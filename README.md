@@ -1,3 +1,10 @@
+> **Kovcsvok AMD-ág (RX 9070 XT):** ez a repó a [Belobug rx9070xt](https://github.com/Belobug/VIctory-Belobug-AMD/tree/rx9070xt)
+> ágra (`cd8dfc06`) épül, rajta a helyben mért és javított „csomag”. **Hol tartunk, mi működik, mi a következő
+> lépés: [HALADAS.md](HALADAS.md).** A jelentések, tervek és mérőeszközök a [`haladas/`](haladas) mappában vannak.
+>
+> *Kovcsvok AMD branch (RX 9070 XT): built on Belobug's rx9070xt branch; the progress overview (Hungarian) is in
+> [HALADAS.md](HALADAS.md). The upstream README follows.*
+
 # VIctory on an RX 7900 XTX
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
