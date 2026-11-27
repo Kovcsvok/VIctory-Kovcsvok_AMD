@@ -230,6 +230,21 @@ macro_rules! once {
     }};
 }
 
+/// `VICTORY_FSR_SHARPNESS`: the sharpening asked for in place of the
+/// title's (0 to 1; 0 turns it off). Read once, logged once.
+fn sharpness_asked() -> Option<f32> {
+    static ASKED: OnceLock<Option<f32>> = OnceLock::new();
+    *ASKED.get_or_init(|| {
+        let spec = std::env::var("VICTORY_FSR_SHARPNESS").ok()?;
+        let value = spec.trim().parse::<f32>().ok().filter(|v| (0.0..=1.0).contains(v));
+        match value {
+            Some(v) => tracing::info!(sharpness = v, "FidelityFX: sharpening of ours in place of the title's (VICTORY_FSR_SHARPNESS)"),
+            None => tracing::warn!(spec, "VICTORY_FSR_SHARPNESS: expected 0 to 1; the title's kept"),
+        }
+        value
+    })
+}
+
 /// Select the PC provider before the title's import registry is initialized.
 pub fn use_host_dir(dir: &Path) -> Result<(), String> {
     let (host, version) = load(dir)?;
@@ -572,6 +587,20 @@ extern "C" fn ffxDispatch(context: *mut *mut c_void, desc: *mut Header) -> u32 {
     }
     // SAFETY: an upscaling, by its type.
     let mut dispatch = unsafe { desc.cast::<DispatchUpscale>().read() };
+    // (Claude, NOT_GTAVI csomag) Sharpening: `settings[0]` is the SDK's
+    // `enableSharpening` (a bool in 4 bytes), `settings[1]` its `sharpness`
+    // (0 to 1). `VICTORY_FSR_SHARPNESS=<0..1>` turns it on at that strength;
+    // unset, the title's own values pass through. The title's are logged once.
+    once!(
+        info,
+        enabled = dispatch.settings[0] & 0xff != 0,
+        sharpness = f32::from_bits(dispatch.settings[1]),
+        "FidelityFX: the title's own sharpening"
+    );
+    if let Some(sharpness) = sharpness_asked() {
+        dispatch.settings[0] = u32::from(sharpness > 0.0);
+        dispatch.settings[1] = sharpness.to_bits();
+    }
     if context.is_null() {
         once!(warn, "FidelityFX dispatch arrived without a context");
         return PARAMETER;

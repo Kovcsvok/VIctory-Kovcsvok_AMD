@@ -1389,6 +1389,57 @@ fn lazy_prelude() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_LAZY_PRELUDE").is_none_or(|v| v != "0"))
 }
 
+/// Whether a host list whose run is over gives its prelude to one pool that
+/// every list takes its next prelude from (`VICTORY_PRELUDE_POOL=1`; off by
+/// default), instead of keeping it for good.
+///
+/// Why: on the RX 9070 XT (driver of 2026-11) every command allocator holds a
+/// megabyte of memory the card shares with the PC from the moment it is made,
+/// grows by whole megabytes with what is recorded and keeps them over its
+/// resets (measured: 500 allocators with lists, +549 MB private, +500 MB
+/// shared; recording 200,000 copies each, 6 MB apiece, kept after a reset).
+/// In the boat run of 2026-11-27 10:52, 2,151 host lists were alive and 1,909
+/// of them had a prelude: nearly two gigabytes for preludes, which run a few
+/// barriers and copies, held by lists that sat idle in the pool or waited for
+/// the title's next reset. With the switch, preludes alive are those of lists
+/// in flight and at most [`SPARE_PRELUDES_MOST`] spare.
+///
+/// Safe for the same reason the list pool is: a prelude enters the pool only
+/// when its list is recycled, after every submission of it has run
+/// (`crate::list::recycle`); [`HostList::prelude`] resets it before recording.
+fn prelude_pool() -> bool {
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick("VICTORY_PRELUDE_POOL") {
+        return on;
+    }
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PRELUDE_POOL").is_some_and(|v| v == "1"))
+}
+
+/// A prelude whose list's runs are over, for any list.
+struct SparePrelude(Prelude);
+// SAFETY: D3D12 allocators and lists are free-threaded objects; a spare one
+// is used by one thread at a time (taken out of the pool under its lock), and
+// only after every submission that ran it has finished.
+unsafe impl Send for SparePrelude {}
+
+static SPARE_PRELUDES: Mutex<Vec<SparePrelude>> = Mutex::new(Vec::new());
+/// The most spare preludes kept; more are let go.
+const SPARE_PRELUDES_MOST: usize = 192;
+/// Preludes taken from the pool, and given back to it, since the start.
+pub(crate) static PRELUDE_POOL: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+fn spare_prelude() -> Option<Prelude> {
+    let taken = SPARE_PRELUDES.lock().unwrap_or_else(|e| e.into_inner()).pop()?;
+    PRELUDE_POOL[0].fetch_add(1, Ordering::Relaxed);
+    Some(taken.0)
+}
+
+/// The number of spare preludes now.
+pub(crate) fn spare_preludes() -> usize {
+    SPARE_PRELUDES.lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
 /// Timestamps per list (diagnostics); commands past them are not timed.
 #[cfg(feature = "diagnostics")]
 const STAMPS: u32 = 4096;
@@ -7006,7 +7057,12 @@ impl HostList {
         }
         let Some((allocator, list)) = self
             .prelude
-            .get_or_init(|| host().and_then(|h| h.make_prelude()))
+            .get_or_init(|| {
+                prelude_pool()
+                    .then(spare_prelude)
+                    .flatten()
+                    .or_else(|| host().and_then(|h| h.make_prelude()))
+            })
             .as_ref()
         else {
             fail(format_args!("no host list for a state prelude"));
@@ -7317,6 +7373,22 @@ impl HostList {
 
     /// The bytes of scratch chunks the list holds now (after a reset:
     /// none while lists share their chunks).
+    /// Gives the list's prelude to the pool every list takes preludes from
+    /// ([`prelude_pool`]): only for a list whose every submission has run.
+    pub(crate) fn give_prelude(&mut self) {
+        if !prelude_pool() {
+            return;
+        }
+        let Some(Some(prelude)) = self.prelude.take() else {
+            return;
+        };
+        let mut spare = SPARE_PRELUDES.lock().unwrap_or_else(|e| e.into_inner());
+        if spare.len() < SPARE_PRELUDES_MOST {
+            spare.push(SparePrelude(prelude));
+            PRELUDE_POOL[1].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub(crate) fn scratch_kept(&self) -> u64 {
         let scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
         scratch.chunks.iter().map(|c| c.1).sum()
@@ -9862,6 +9934,9 @@ impl Host {
                 crate::popwatch::take(&self.device, list, texture)
             };
             p.panel.draw(self, copy, &back, (width, height), format);
+            // F9: the picture as shown, the HUD on it, to a video (`crate::record`).
+            #[cfg(feature = "diagnostics")]
+            let recorded = crate::record::frame(&self.device, list, &back);
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
             if composed {
@@ -9894,6 +9969,8 @@ impl Host {
                     0
                 }
             };
+            #[cfg(feature = "diagnostics")]
+            crate::record::sent(recorded);
             #[cfg(feature = "diagnostics")]
             if let Some(taken) = watched {
                 crate::popwatch::sent(taken, flown, frame);

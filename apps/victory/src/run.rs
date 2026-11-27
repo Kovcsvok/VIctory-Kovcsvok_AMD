@@ -84,6 +84,18 @@ pub fn run(
         let cache = cfg.cache_subdir(&format!("images/fsr-{}-4k-sdr", preset.name()))?;
         victory_loader::load(&prepared, &cache)?
     } else {
+        // (Claude, NOT_GTAVI csomag) Any profile: with a FidelityFX folder named
+        // (`VICTORY_FIDELITYFX_DIR` / `[paths].fidelityfx_dir`), the title's own
+        // FSR calls go to the PC upscaler too, as KLBF's `VICTORY_FSR_DLL` does
+        // in Series S mode; without one the title keeps its console DLLs.
+        // `VICTORY_FSR_PC=0` keeps the console DLLs even with a folder named.
+        if let Some(dir) = cfg.fidelityfx_dir.as_deref()
+            && std::env::var_os("VICTORY_FSR_PC").is_none_or(|v| v != "0")
+        {
+            victory_hle::modules::fidelityfx::use_host_dir(dir)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| format!("loading the PC FidelityFX upscaler from {}", dir.display()))?;
+        }
         victory_loader::load(&prepared, &images)?
     };
     // The program is mapped from the copy `load` wrote: the file's bytes
@@ -202,6 +214,18 @@ pub fn run(
         let patched = done.iter().filter(|d| **d == Hooked::Done).count();
         println!("renderer port 2: {patched} of {} descriptor record stores of the title patched", SITES.len());
         victory_hle::port_descriptors::hooked(image.base(), size, patched);
+        // VICTORY_PORT_COPIES=1: the frame allocator's table copies the six
+        // stores miss (its own memcpy, a 128-byte copy) mark their slots too.
+        // A third fewer records left to the fallback (runs pop-4/pop-5), no
+        // change seen in the picture (POPIN.md): off by default.
+        if std::env::var("VICTORY_PORT_COPIES").is_ok_and(|v| v.trim() == "1") {
+            use victory_loader::descriptor_sites::{TITLE_MEMCPY, apply_copies};
+            let hook = victory_hle::port_descriptors::title_copy_hook(image.base() + TITLE_MEMCPY);
+            // SAFETY: as above; the hook is a function of ours.
+            let done = unsafe { apply_copies(image.base(), size, victory_hle::port_descriptors::marks_address(), hook) };
+            let copies = done.iter().filter(|d| **d == Hooked::Done).count();
+            println!("renderer port 2: {copies} of {} table copies of the title patched", done.len());
+        }
     }
     // The frame rate (VICTORY_FRAME_INTERVAL_MS, off without it): our frame
     // clock ticks at that interval (victory-gpu), and the title is given

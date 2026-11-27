@@ -250,6 +250,24 @@ impl Canvas {
         x
     }
 
+    /// 8-bit RGBA, unscaled: the box's background at `bg` alpha, its lines
+    /// halfway to opaque, everything drawn on it opaque.
+    fn rgba(&self, bg: u8) -> Vec<u8> {
+        let lines = (bg / 2 + 128).max(bg);
+        let mut out = Vec::with_capacity(self.rgb.len() * 4);
+        for &c in &self.rgb {
+            let a = if c == BG || c == GRAPH_BG || c == BAR_BG {
+                bg
+            } else if c == BORDER || c == GRAPH_GRID {
+                lines
+            } else {
+                255
+            };
+            out.extend_from_slice(&[c[0], c[1], c[2], a]);
+        }
+        out
+    }
+
     /// Packs the logical canvas scaled by `scale` into swap-chain bytes.
     fn pack(&self, scale: u32, format: DXGI_FORMAT, pitch: usize) -> Vec<u8> {
         let bytes = bpp(format).unwrap_or(4);
@@ -405,8 +423,12 @@ impl CpuMeter {
             self.cores_pct.clear();
             let mut sum = 0.0f32;
             for (&(pi, pt), &(ni, nt)) in self.prev.iter().zip(&now) {
-                let dt = (nt - pt).max(1) as f32;
-                let di = (ni - pi).clamp(0, nt - pt) as f32;
+                // A core's total can read lower than the time before (seen on an
+                // i5-14600KF: -15.6 ms); clamp against the floored span, or
+                // `clamp` panics with min > max and takes the submit thread down.
+                let span = (nt - pt).max(1);
+                let dt = span as f32;
+                let di = (ni - pi).clamp(0, span) as f32;
                 let busy = ((1.0 - di / dt) * 100.0).clamp(0.0, 100.0);
                 self.cores_pct.push(busy);
                 sum += busy;
@@ -643,6 +665,228 @@ fn paint_hud(s: &Snapshot) -> Canvas {
     c
 }
 
+/// The clock strip under the box: the UTC time of the frame to the
+/// millisecond, written as the log's timestamps are, and the frame number,
+/// painted anew at every frame, so that a video of the screen can be put
+/// beside the log. Its size: one line; with switches that change while the
+/// title runs (`VICTORY_AB`), a second line with the phase under way and the
+/// switches that are off in it, as wide as the box.
+fn clock_size() -> (u32, u32) {
+    #[cfg(all(windows, feature = "diagnostics"))]
+    if crate::ab::active() {
+        return (BASE_W, 44);
+    }
+    (BASE_W, 24)
+}
+/// Upload buffers the strip goes through in turn: the one written now was
+/// last read by the card so many frames ago.
+const CLOCK_TURNS: usize = 8;
+
+/// `HH:MM:SS.mmm` of `now` in UTC.
+fn utc_ms(now: std::time::SystemTime) -> String {
+    let d = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let s = d.as_secs() % 86_400;
+    format!("{:02}:{:02}:{:02}.{:03}", s / 3600, s / 60 % 60, s % 60, d.subsec_millis())
+}
+
+fn paint_clock(time: &str, frame: u64) -> Canvas {
+    let (w, h) = clock_size();
+    let mut c = Canvas::new(w, h, BG);
+    c.border(0, 0, w, h, BORDER);
+    let x = c.text(14, 5, 2, LABEL, "UTC ");
+    let x = c.text(x, 5, 2, YELLOW, time);
+    let x = c.text_sep(x, 5, 2, WHITE, &format!(" | FRAME {frame}"));
+    // F9 records the picture (`crate::record`).
+    #[cfg(all(windows, feature = "diagnostics"))]
+    if crate::record::recording() {
+        let x = c.text_sep(x, 5, 2, WHITE, " | ");
+        c.text(x, 5, 2, RED, "REC");
+    }
+    #[cfg(not(all(windows, feature = "diagnostics")))]
+    let _ = x;
+    #[cfg(all(windows, feature = "diagnostics"))]
+    if let Some((phase, off)) = crate::ab::label() {
+        let x = c.text(14, 25, 2, LABEL, "AB ");
+        let x = c.text(x, 25, 2, YELLOW, &phase);
+        c.text(x, 25, 2, WHITE, &format!(" | KI: {off}"));
+    }
+    c
+}
+
+/// The see-through HUD: the box and the clock strip are drawn over the
+/// picture by a small shader that reads their pixels (8-bit RGBA, unscaled)
+/// from an upload buffer and blends them in. Text, numbers and the graph's
+/// bars stay opaque; the dark background shows the picture through
+/// ([`background_alpha`]). If the pipeline cannot be made, the box is copied
+/// on as before.
+const BLEND_SOURCE: &str = r#"
+#define RS "RootConstants(num32BitConstants=4, b0), SRV(t0)"
+cbuffer Box : register(b0) { uint x0; uint y0; uint wide; uint scale; };
+ByteAddressBuffer pixels : register(t0);
+[RootSignature(RS)]
+float4 vs(uint id : SV_VertexID) : SV_Position {
+    float2 uv = float2((id << 1) & 2, id & 2);
+    return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+[RootSignature(RS)]
+float4 ps(float4 pos : SV_Position) : SV_Target {
+    uint2 p = (uint2(pos.xy) - uint2(x0, y0)) / scale;
+    uint v = pixels.Load((p.y * wide + p.x) * 4);
+    return float4(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, v >> 24) / 255.0;
+}
+"#;
+
+/// The background's opacity (`VICTORY_PANEL_ALPHA`, 0..1, default 0.45; 1:
+/// opaque, the box copied on as before).
+fn background_alpha() -> u8 {
+    static A: OnceLock<u8> = OnceLock::new();
+    *A.get_or_init(|| {
+        let a = std::env::var("VICTORY_PANEL_ALPHA").ok().and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(0.45);
+        (a.clamp(0.0, 1.0) * 255.0).round() as u8
+    })
+}
+
+fn blend_compile(entry: windows::core::PCSTR, target: windows::core::PCSTR) -> windows::core::Result<windows::Win32::Graphics::Direct3D::ID3DBlob> {
+    let mut code = None;
+    let mut errors: Option<windows::Win32::Graphics::Direct3D::ID3DBlob> = None;
+    // SAFETY: the source and names live through the call; the out pointers are ours.
+    let compiled = unsafe {
+        windows::Win32::Graphics::Direct3D::Fxc::D3DCompile(
+            BLEND_SOURCE.as_ptr().cast(),
+            BLEND_SOURCE.len(),
+            windows::core::s!("panel"),
+            None,
+            None,
+            entry,
+            target,
+            0,
+            0,
+            &mut code,
+            Some(&mut errors),
+        )
+    };
+    if let Err(e) = compiled {
+        if let Some(errors) = errors {
+            // SAFETY: the blob's own bytes.
+            let text = unsafe { std::slice::from_raw_parts(errors.GetBufferPointer().cast::<u8>(), errors.GetBufferSize()) };
+            tracing::warn!("panel blend shader: {}", String::from_utf8_lossy(text));
+        }
+        return Err(e);
+    }
+    code.ok_or_else(windows::core::Error::empty)
+}
+
+/// The blending pipeline for one swap-chain format.
+struct Blend {
+    format: DXGI_FORMAT,
+    root: ID3D12RootSignature,
+    pso: ID3D12PipelineState,
+}
+
+// SAFETY: D3D12 objects are free-threaded.
+unsafe impl Send for Blend {}
+
+impl Blend {
+    fn new(host: &Host, format: DXGI_FORMAT) -> windows::core::Result<Blend> {
+        let vs = blend_compile(windows::core::s!("vs"), windows::core::s!("vs_5_1"))?;
+        let ps = blend_compile(windows::core::s!("ps"), windows::core::s!("ps_5_1"))?;
+        // SAFETY: the blobs' own bytes, alive through the calls; the description never releases the root signature.
+        unsafe {
+            let code = |b: &windows::Win32::Graphics::Direct3D::ID3DBlob| D3D12_SHADER_BYTECODE {
+                pShaderBytecode: b.GetBufferPointer(),
+                BytecodeLength: b.GetBufferSize(),
+            };
+            let root: ID3D12RootSignature = host
+                .device
+                .CreateRootSignature(0, std::slice::from_raw_parts(vs.GetBufferPointer().cast::<u8>(), vs.GetBufferSize()))?;
+            let mut desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
+                pRootSignature: std::mem::transmute_copy(&root),
+                VS: code(&vs),
+                PS: code(&ps),
+                SampleMask: u32::MAX,
+                RasterizerState: D3D12_RASTERIZER_DESC {
+                    FillMode: D3D12_FILL_MODE_SOLID,
+                    CullMode: D3D12_CULL_MODE_NONE,
+                    ..Default::default()
+                },
+                PrimitiveTopologyType: D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+                NumRenderTargets: 1,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                ..Default::default()
+            };
+            desc.RTVFormats[0] = format;
+            desc.BlendState.RenderTarget[0] = D3D12_RENDER_TARGET_BLEND_DESC {
+                BlendEnable: true.into(),
+                LogicOpEnable: false.into(),
+                SrcBlend: D3D12_BLEND_SRC_ALPHA,
+                DestBlend: D3D12_BLEND_INV_SRC_ALPHA,
+                BlendOp: D3D12_BLEND_OP_ADD,
+                SrcBlendAlpha: D3D12_BLEND_ZERO,
+                DestBlendAlpha: D3D12_BLEND_ONE,
+                BlendOpAlpha: D3D12_BLEND_OP_ADD,
+                LogicOp: D3D12_LOGIC_OP_NOOP,
+                RenderTargetWriteMask: (D3D12_COLOR_WRITE_ENABLE_RED.0
+                    | D3D12_COLOR_WRITE_ENABLE_GREEN.0
+                    | D3D12_COLOR_WRITE_ENABLE_BLUE.0) as u8,
+            };
+            let pso = host.device.CreateGraphicsPipelineState(&desc)?;
+            Ok(Blend { format, root, pso })
+        }
+    }
+}
+
+/// Upload buffers an RGBA picture goes through in turn; the card reads the
+/// one put last, by its address.
+struct Rgba {
+    uploads: Vec<(ID3D12Resource, *mut u8)>,
+    turn: usize,
+}
+
+// SAFETY: as `Buffers`.
+unsafe impl Send for Rgba {}
+
+impl Rgba {
+    fn new(host: &Host, bytes: u64, count: usize) -> Option<Rgba> {
+        let uploads = (0..count).map(|_| host.upload_buffer(bytes)).collect::<Option<Vec<_>>>()?;
+        Some(Rgba { uploads, turn: 0 })
+    }
+
+    /// Puts `picture` into the next buffer; its address.
+    fn put(&mut self, picture: &[u8]) -> u64 {
+        self.turn = (self.turn + 1) % self.uploads.len();
+        // SAFETY: a mapped upload buffer of the picture's size, last read by the card `uploads.len()` puts ago.
+        unsafe { std::ptr::copy_nonoverlapping(picture.as_ptr(), self.uploads[self.turn].1, picture.len()) };
+        self.address()
+    }
+
+    fn address(&self) -> u64 {
+        // SAFETY: a plain query of a live buffer.
+        unsafe { self.uploads[self.turn].0.GetGPUVirtualAddress() }
+    }
+}
+
+/// The clock strip's upload buffers, copied straight onto the swap chain's
+/// buffer (a strip a frame is a few tens of kilobytes).
+struct Clock {
+    format: DXGI_FORMAT,
+    scale: u32,
+    pitch: u32,
+    uploads: Vec<(ID3D12Resource, *mut u8)>,
+    turn: usize,
+}
+
+// SAFETY: as `Buffers`.
+unsafe impl Send for Clock {}
+
+impl Clock {
+    fn new(host: &Host, format: DXGI_FORMAT, scale: u32) -> Option<Clock> {
+        let pitch = (clock_size().0 * scale * bpp(format)? as u32).next_multiple_of(256);
+        let bytes = u64::from(pitch) * u64::from(clock_size().1 * scale);
+        let uploads = (0..CLOCK_TURNS).map(|_| host.upload_buffer(bytes)).collect::<Option<Vec<_>>>()?;
+        Some(Clock { format, scale, pitch, uploads, turn: 0 })
+    }
+}
+
 /// The buffers of a box that size and format.
 struct Buffers {
     format: DXGI_FORMAT,
@@ -716,6 +960,12 @@ pub(super) struct Panel {
     changed: bool,
     buffers: Option<Buffers>,
     failed: bool,
+    clock: Option<Clock>,
+    blend: Option<Blend>,
+    /// The format a blending pipeline could not be made for.
+    blend_failed: Option<DXGI_FORMAT>,
+    hud_rgba: Option<Rgba>,
+    clock_rgba: Option<Rgba>,
 }
 
 impl Panel {
@@ -735,6 +985,11 @@ impl Panel {
             changed: false,
             buffers: None,
             failed: false,
+            clock: None,
+            blend: None,
+            blend_failed: None,
+            hud_rgba: None,
+            clock_rgba: None,
         }
     }
 
@@ -840,6 +1095,93 @@ impl Panel {
         self.cost = now.elapsed();
     }
 
+    /// The see-through box and clock strip blended onto `back` (in the state to
+    /// be copied into, as it is left); `false`: not done, copy the box on.
+    fn draw_blended(
+        &mut self,
+        host: &Host,
+        list: &HostList,
+        back: &ID3D12Resource,
+        (width, height): (u32, u32),
+        format: DXGI_FORMAT,
+        scale: u32,
+    ) -> bool {
+        let alpha = background_alpha();
+        if alpha == 255 || self.blend_failed == Some(format) {
+            return false;
+        }
+        let (bw, bh) = (BASE_W * scale, BASE_H * scale);
+        let (cw, ch) = (clock_size().0 * scale, clock_size().1 * scale);
+        if bw > width || bh > height {
+            return false;
+        }
+        if self.blend.as_ref().is_none_or(|b| b.format != format) {
+            match Blend::new(host, format) {
+                Ok(blend) => {
+                    tracing::info!(format = format.0, alpha, "panel: see-through HUD (VICTORY_PANEL_ALPHA)");
+                    self.blend = Some(blend);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, format = format.0, "panel: no blending pipeline; the box is copied on");
+                    self.blend_failed = Some(format);
+                    return false;
+                }
+            }
+        }
+        if self.hud_rgba.is_none() {
+            self.hud_rgba = Rgba::new(host, u64::from(BASE_W * BASE_H * 4), UPLOADS);
+            self.changed = true;
+        }
+        if self.clock_rgba.is_none() {
+            self.clock_rgba = Rgba::new(host, u64::from(clock_size().0 * clock_size().1 * 4), CLOCK_TURNS);
+        }
+        let (Some(hud), Some(clock), Some(blend), Some(snap)) =
+            (&mut self.hud_rgba, &mut self.clock_rgba, &self.blend, &self.snap)
+        else {
+            return false;
+        };
+        let hud_at = if std::mem::take(&mut self.changed) { hud.put(&paint_hud(snap).rgba(alpha)) } else { hud.address() };
+        let time = utc_ms(std::time::SystemTime::now());
+        let clock_at = clock.put(&paint_clock(&time, crate::frame::current()).rgba(alpha));
+        let list = &list.list;
+        // SAFETY: an open list; live resources; the upload buffers' addresses are of buffers no later put
+        // overwrites while the card may read them (`UPLOADS` puts a quarter second apart, `CLOCK_TURNS` frames).
+        unsafe {
+            list.ResourceBarrier(&[transition(back, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET)]);
+            let rtv = host.rtv(Some(back), None);
+            list.OMSetRenderTargets(1, Some(&rtv), false, None);
+            list.SetGraphicsRootSignature(&blend.root);
+            list.SetPipelineState(&blend.pso);
+            list.IASetPrimitiveTopology(windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            let quad = |at: u64, (x, y): (u32, u32), (w, h): (u32, u32), wide: u32| {
+                list.RSSetViewports(&[D3D12_VIEWPORT {
+                    TopLeftX: x as f32,
+                    TopLeftY: y as f32,
+                    Width: w as f32,
+                    Height: h as f32,
+                    MinDepth: 0.0,
+                    MaxDepth: 1.0,
+                }]);
+                list.RSSetScissorRects(&[windows::Win32::Foundation::RECT {
+                    left: x as i32,
+                    top: y as i32,
+                    right: (x + w) as i32,
+                    bottom: (y + h) as i32,
+                }]);
+                let constants = [x, y, wide, scale];
+                list.SetGraphicsRoot32BitConstants(0, 4, constants.as_ptr().cast(), 0);
+                list.SetGraphicsRootShaderResourceView(1, at);
+                list.DrawInstanced(3, 1, 0, 0);
+            };
+            quad(hud_at, (0, 0), (bw, bh), BASE_W);
+            if bh + ch <= height && cw <= width {
+                quad(clock_at, (0, bh), (cw, ch), clock_size().0);
+            }
+            list.ResourceBarrier(&[transition(back, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST)]);
+        }
+        true
+    }
+
     /// Records the copy of the box onto `back`, a buffer of the swap chain of
     /// that size and format in the state to be copied into.
     pub(super) fn draw(
@@ -854,14 +1196,21 @@ impl Panel {
         if !shown().load(Ordering::Relaxed) || self.failed {
             return;
         }
-        let Some(snap) = self.snap.as_ref() else {
+        if self.snap.is_none() {
             return;
-        };
+        }
         let began = Instant::now();
         // Not the title's: the frame recorder leaves it out.
         #[cfg(feature = "diagnostics")]
         let _ours = crate::replay::record::unrecorded();
         let scale = scale(height);
+        if self.draw_blended(host, list, back, (width, height), format, scale) {
+            self.cost += began.elapsed();
+            return;
+        }
+        let Some(snap) = self.snap.as_ref() else {
+            return;
+        };
         if self.buffers.as_ref().is_none_or(|b| (b.format, b.scale) != (format, scale)) {
             // (What the card may still read stays: a picture's size changes once or twice in a run.)
             std::mem::forget(self.buffers.take());
@@ -923,6 +1272,48 @@ impl Panel {
                 back: 1,
             };
             list.CopyTextureRegion(&to, 0, 0, 0, &from, Some(&part));
+        }
+        // The clock strip under the box, painted at every frame.
+        if self.clock.as_ref().is_none_or(|c| (c.format, c.scale) != (format, scale)) {
+            std::mem::forget(self.clock.take());
+            self.clock = Clock::new(host, format, scale);
+        }
+        if let Some(clock) = &mut self.clock {
+            let (cw, ch) = (clock_size().0 * scale, clock_size().1 * scale);
+            if h + ch <= height && cw <= width {
+                let time = utc_ms(std::time::SystemTime::now());
+                let picture = paint_clock(&time, crate::frame::current()).pack(scale, format, clock.pitch as usize);
+                clock.turn = (clock.turn + 1) % CLOCK_TURNS;
+                let (buffer, mapped) = &clock.uploads[clock.turn];
+                // SAFETY: a mapped upload buffer of the strip's size, which the card read CLOCK_TURNS frames ago;
+                // an open list and live resources, the strip within both.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(picture.as_ptr(), *mapped, picture.len());
+                    let from = D3D12_TEXTURE_COPY_LOCATION {
+                        pResource: std::mem::transmute_copy(buffer),
+                        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                            PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                                Offset: 0,
+                                Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                                    Format: format,
+                                    Width: cw,
+                                    Height: ch,
+                                    Depth: 1,
+                                    RowPitch: clock.pitch,
+                                },
+                            },
+                        },
+                    };
+                    let to = D3D12_TEXTURE_COPY_LOCATION {
+                        pResource: std::mem::transmute_copy(back),
+                        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+                    };
+                    let part = D3D12_BOX { left: 0, top: 0, front: 0, right: cw, bottom: ch, back: 1 };
+                    list.CopyTextureRegion(&to, 0, h, 0, &from, Some(&part));
+                }
+            }
         }
         self.cost += began.elapsed();
     }

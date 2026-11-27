@@ -377,6 +377,10 @@ pub fn wait_for_previous() {
 }
 
 fn end() {
+    // A video recording (F9) that runs is closed: TerminateProcess would
+    // leave its file without length and index.
+    #[cfg(windows)]
+    victory_gpu::end_recording();
     // Compiled host pipelines kept for the next run.
     #[cfg(windows)]
     victory_gpu::pipeline::save_pipeline_cache();

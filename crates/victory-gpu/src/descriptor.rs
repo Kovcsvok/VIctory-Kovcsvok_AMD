@@ -751,7 +751,19 @@ static SYNC_SPLIT: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomi
 #[cfg(windows)]
 pub(crate) fn sync_line(frames: f64) {
     crate::port_descriptors::line(frames);
-    let [twins, moved, lost] = [0, 1, 2].map(|i| host::TWINS[i].swap(0, std::sync::atomic::Ordering::Relaxed));
+    crate::draw::in_place_indirect_line(frames);
+    let [twins, moved, lost, exact] = [0, 1, 2, 3].map(|i| host::TWINS[i].swap(0, std::sync::atomic::Ordering::Relaxed));
+    let moves = host::TWIN_MOVES.each_ref().map(|m| m.swap(0, std::sync::atomic::Ordering::Relaxed));
+    if moves.iter().any(|&m| m > 0) {
+        let f = |m: u64| m as f64 / frames.max(1.0);
+        tracing::info!(
+            "raw twins off 16 bytes per frame: of shader resource views {:.1} moved, {:.1} not in the thread's slot, {:.1} whose descriptor was not as asked; of unordered access views {:.1}, {:.1}, {:.1}",
+            f(moves[0]), f(moves[1]), f(moves[2]), f(moves[3]), f(moves[4]), f(moves[5])
+        );
+    }
+    if exact > 0 {
+        tracing::info!(exact, "raw twins made from their own dword, not on 16 bytes (VICTORY_TWIN_EXACT=0: null views), since the last line");
+    }
     if twins > 0 {
         tracing::info!(
             "raw twins of buffer views made per frame (VICTORY_RAW_VIEWS=0: none): {:.0}, of them {:.1} that do not begin on 16 bytes ({:.1} null)",

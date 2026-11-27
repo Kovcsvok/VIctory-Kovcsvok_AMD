@@ -3815,7 +3815,92 @@ fn buffer_view_ok(format: DXGI_FORMAT, first: u64, count: u32, stride: u32, raw:
 /// Raw twins ([`raw_twins`]) made since the last frame line, and those of them that
 /// do not begin on 16 bytes, as a raw view must ([`move_raw`]), and those of
 /// these that could not be moved there (null).
-pub(crate) static TWINS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+pub(crate) static TWINS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+/// Whether raw twins of buffer views that do not begin on 16 bytes begin at
+/// the view's own dword (`VICTORY_TWIN_EXACT=1`; off by default here: a null
+/// view, as before, unless [`move_raw`] can move a staged one). Read once.
+///
+/// Off on the RX 9070 XT: with it the device was removed (invalid call,
+/// 0x887A0001) at the loading screen and 13 ms after an A/B phase turned it
+/// on in play (2026-11-27, runs twin-a and ab-proba); the driver takes no
+/// raw view off 16 bytes made through the API.
+///
+/// D3D12 asks raw views to begin on 16 bytes; AMD's hardware and RADV read a
+/// raw buffer from any dword. Null, such a twin read zeros: the tree culling
+/// (`InstanceCulling:CS_Tree_BatchCull`) runs in two dispatches a frame, and
+/// the second one's batch list begins right after the first one's 4-byte
+/// entries, so in every frame whose split left it off 16 bytes the second
+/// dispatch read a list of zeros and its trees were not drawn: whole trees
+/// and palms dropped out for single frames while the camera moved (the
+/// "Just Like Paradise" title shot, frames 1 and 2 of capture title3; up to
+/// 1,000 such twins a frame in play). With the twins exact: 0 flicker frames
+/// (run titleTX).
+fn twin_exact() -> bool {
+    #[cfg(all(windows, feature = "diagnostics"))]
+    if let Some(on) = crate::ab::pick("VICTORY_TWIN_EXACT") {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_TWIN_EXACT").is_some_and(|v| v == "1"))
+}
+
+/// Raw twins off 16 bytes since the last line, by what became of them: of
+/// shader resource views moved ([`move_raw`]), not in this thread's slot,
+/// their descriptor not as asked; the same of unordered access views.
+pub(crate) static TWIN_MOVES: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+
+/// [`move_raw`] for the twin at `twin` of a shader resource view (`uav`
+/// false) or an unordered access view, counted ([`TWIN_MOVES`]); the first
+/// descriptors it would not move are logged with what was asked.
+fn move_twin(twin: D3D12_CPU_DESCRIPTOR_HANDLE, start: u64, bytes: u32, by: u32, uav: bool) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    let listed = twin_move()
+        && LIST_SPAN.try_with(|span| {
+            let (from, to) = span.get();
+            (from..to).contains(&twin.ptr)
+        }) == Ok(true);
+    let what = if !(listed || staged(false, 1).is_some_and(|s| s.ptr == twin.ptr)) {
+        1
+    } else if move_raw(twin, start, bytes, by) {
+        0
+    } else {
+        static LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if LOGGED.fetch_add(1, Relaxed) < 12 {
+            let mut words = [0u8; 32];
+            let read = crate::host::read_into(twin.ptr as *const u8, &mut words);
+            let words: Vec<String> = words.chunks(4).map(|w| format!("{:08x}", u32::from_le_bytes([w[0], w[1], w[2], w[3]]))).collect();
+            tracing::info!(uav, start = format_args!("{start:#x}"), bytes, by, read, words = words.join(" "), "raw twin off 16 bytes not moved: its descriptor is not as asked");
+        }
+        2
+    };
+    TWIN_MOVES[if uav { 3 } else { 0 } + what].fetch_add(1, Relaxed);
+    what == 0
+}
+
+/// Whether the raw twins of views made for a list's own slots
+/// ([`HostHeap::make_listed`]: the tables of draws and dispatches) are moved
+/// as [`staged`] ones are, when they do not begin on 16 bytes
+/// (`VICTORY_TWIN_MOVE`, on; `=0`: left null, as before; A/B-able).
+///
+/// Such a twin is made in this thread's [`ListViews`] heap, which the card
+/// does not see, and copied into the list's slot after: as safe to move as
+/// a staged one. Left null, it read zeros. In a test start on the
+/// RX 9070 XT (2026-11-27, run learn-b) 90 twins a frame off 16 bytes were
+/// moved and 200 to 700 left null, every one of these made for a list, none
+/// whose descriptor was not as [`move_raw`] asks: the tree culling's second
+/// batch list (avatarmanz PR 437: `InstanceCulling:CS_Tree_BatchCull`) is
+/// one, and whole trees and palms dropped out while it was null. PR 437's
+/// own way, a raw view off 16 bytes made through the API, removed the device
+/// on this card ([`twin_exact`]).
+fn twin_move() -> bool {
+    #[cfg(all(windows, feature = "diagnostics"))]
+    if let Some(on) = crate::ab::pick("VICTORY_TWIN_MOVE") {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_TWIN_MOVE").is_none_or(|v| v != "0"))
+}
 
 /// Moves the raw view at `at`, a slot of our heaps the card does not see,
 /// which shows `bytes` from `start` on (GPU address), `by` bytes on: for a
@@ -3967,7 +4052,15 @@ fn buffer_srv(
                     .CreateShaderResourceView(&shadow.buffer, Some(&desc), twin);
                 shadow.buffer.GetGPUVirtualAddress() + first * 4
             };
-            if by > 0 && !(staged(false, 1).is_some_and(|s| s.ptr == twin.ptr) && move_raw(twin, start, count.saturating_mul(4), by)) {
+            if by > 0 && twin_exact() {
+                // The raw twin from the view's own first dword (on 4 bytes, not
+                // 16), not a null view ([`twin_exact`]).
+                TWINS[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                desc.Anonymous.Buffer.FirstElement = first + u64::from(by / 4);
+                desc.Anonymous.Buffer.NumElements = count - by / 4;
+                // SAFETY: a live buffer and a slot of our heap.
+                unsafe { host.device.CreateShaderResourceView(&shadow.buffer, Some(&desc), twin) };
+            } else if by > 0 && !move_twin(twin, start, count.saturating_mul(4), by, false) {
                 TWINS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 null_buffer_view(twin);
             }
@@ -4091,7 +4184,15 @@ fn buffer_uav(
                     .CreateUnorderedAccessView(&shadow.buffer, None::<&ID3D12Resource>, Some(&desc), twin);
                 shadow.buffer.GetGPUVirtualAddress() + first * 4
             };
-            if by > 0 && !(staged(false, 1).is_some_and(|s| s.ptr == twin.ptr) && move_raw(twin, start, count.saturating_mul(4), by)) {
+            if by > 0 && twin_exact() {
+                // The raw twin from the view's own first dword (on 4 bytes, not
+                // 16), not a null view ([`twin_exact`]).
+                TWINS[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                desc.Anonymous.Buffer.FirstElement = first + u64::from(by / 4);
+                desc.Anonymous.Buffer.NumElements = count - by / 4;
+                // SAFETY: a live buffer and a slot of our heap.
+                unsafe { host.device.CreateUnorderedAccessView(&shadow.buffer, None::<&ID3D12Resource>, Some(&desc), twin) };
+            } else if by > 0 && !move_twin(twin, start, count.saturating_mul(4), by, true) {
                 TWINS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 null_buffer_view(twin);
             }
@@ -4513,20 +4614,26 @@ fn make_twinned(
                 // shortcut: unordered access to a texture the title placed
                 // itself is not mirrored; give it a resource as shader
                 // views of such textures get when a dispatch writes one.
-                // Each texture is said once (the first 64), with how many times
-                // such a view was asked for so far: what shaders write through
-                // them is lost.
+                // Each view is said once (the first 64 different ones, all
+                // 16 words of the title's description: words 10 and 11 are
+                // 0 in these, unlike in shader views, so where the address
+                // is is still to be found), with how many times such a view
+                // was asked for so far: what shaders write through them is
+                // lost.
                 static SAID: Mutex<std::collections::BTreeSet<u64>> = Mutex::new(std::collections::BTreeSet::new());
                 static TIMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let times = TIMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 let at = u64::from(desc[10]) | u64::from(desc[11]) << 32;
+                let key = resource[..13]
+                    .iter()
+                    .chain(desc.iter())
+                    .fold(0xcbf2_9ce4_8422_2325u64, |h, w| (h ^ u64::from(*w)).wrapping_mul(0x100_0000_01b3));
                 let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
-                if (said.len() < 64 && said.insert(at)) || times.is_power_of_two() {
+                if (said.len() < 64 && said.insert(key)) || times.is_power_of_two() {
                     tracing::warn!(
                         address = format_args!("{at:#x}"),
                         times,
-                        "placed unordered texture view not mirrored (null: writes through it are lost): resource {resource:?}, view {:?}",
-                        &desc[..10]
+                        "placed unordered texture view not mirrored (null: writes through it are lost): resource {resource:?}, view {desc:?}"
                     );
                 }
                 return None;
@@ -6120,6 +6227,7 @@ impl ListViews {
                 .ok()?;
             let step = host.device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) as usize;
             let start = heap.GetCPUDescriptorHandleForHeapStart().ptr;
+            LIST_SPAN.with(|span| span.set((start, start + Self::SLOTS as usize * step)));
             Some(ListViews { recording: 0, heap, step, start, made: Default::default() })
         }
     }
@@ -6132,6 +6240,10 @@ impl ListViews {
 
 thread_local! {
     static LIST_VIEWS: std::cell::RefCell<Option<ListViews>> = const { std::cell::RefCell::new(None) };
+    /// The CPU handles of this thread's [`ListViews`] heap, from first to
+    /// past the last ([`move_twin`]: its slots are this thread's own, in a
+    /// heap the card does not see, as [`staged`]'s are).
+    static LIST_SPAN: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
 /// The view the record `words` names, as this thread made it for `recording`.

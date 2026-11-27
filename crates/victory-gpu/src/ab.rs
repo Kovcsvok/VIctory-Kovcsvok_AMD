@@ -44,6 +44,27 @@ pub(crate) fn on(bit: u32) -> bool {
     BITS.load(Relaxed) >> bit & 1 != 0
 }
 
+/// Whether switches change while the title runs.
+pub(crate) fn active() -> bool {
+    asked().is_some()
+}
+
+/// For the HUD: the phase's bits (as the log's "A/B phase .. bits" line
+/// has them) and the switches off in it, each by the last word of its name,
+/// five letters at most ("-": none off).
+pub(crate) fn label() -> Option<(String, String)> {
+    let asked = asked()?;
+    let bits = BITS.load(Relaxed);
+    let off: Vec<&str> = asked.switches.iter().enumerate().filter(|(n, _)| bits >> n & 1 == 0).map(|(_, s)| short(s)).collect();
+    Some((bits.to_string(), if off.is_empty() { "-".to_string() } else { off.join(" ") }))
+}
+
+/// `VICTORY_PORT_JOURNAL` -> `JOURN`.
+fn short(switch: &str) -> &str {
+    let word = switch.rsplit('_').next().unwrap_or(switch);
+    &word[..word.len().min(5)]
+}
+
 /// What the run has seen of the phase under way.
 struct Phase {
     started: std::time::Instant,
@@ -127,5 +148,6 @@ mod tests {
         assert_eq!(summary(&mut [30.0, 10.0, 20.0]), (20.0, 20.0, 30.0));
         assert_eq!(summary(&mut []), (0.0, 0.0, 0.0));
         assert_eq!(pick("VICTORY_NONE_SUCH"), None);
+        assert_eq!((short("VICTORY_PORT_JOURNAL"), short("VICTORY_LAND_ECHO"), short("X")), ("JOURN", "ECHO", "X"));
     }
 }

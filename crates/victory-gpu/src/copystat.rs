@@ -1013,10 +1013,14 @@ fn log_memory() {
     tracing::info!(
         "memory, windows: the {:.0} MB of windows lie over {:.0} MB of title memory (the rest is \
          memory that is in more than one window, and is copied once for each); host lists never \
-         reset since they were made: {}",
+         reset since they were made: {}; preludes of the pool of spare ones \
+         (VICTORY_PRELUDE_POOL): {} taken, {} given to it, {} spare now",
         mb(copies[3]),
         mb(crate::shadow::window_cover()),
         lists[3],
+        crate::host::PRELUDE_POOL[0].load(Relaxed),
+        crate::host::PRELUDE_POOL[1].load(Relaxed),
+        crate::host::spare_preludes(),
     );
     if memory_categories() {
         let fields: &[(&str, u64)] = &[

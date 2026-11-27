@@ -25,6 +25,8 @@ mod texlate;
 mod texstore;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod capture;
+#[cfg(all(windows, feature = "diagnostics"))]
+mod record;
 #[cfg(windows)]
 mod compose;
 pub mod console;
@@ -118,6 +120,14 @@ pub use host::on_failure;
 #[cfg(all(windows, feature = "diagnostics"))]
 pub fn switched(switch: &str) -> Option<bool> {
     ab::pick(switch)
+}
+
+/// The process is ending (the title's lifecycle ends it): a video recording
+/// that runs (F9) is closed first, so the file gets its length and index.
+#[cfg(windows)]
+pub fn end_recording() {
+    #[cfg(feature = "diagnostics")]
+    record::end_at_exit();
 }
 
 /// What the frame is at (`copystat::phase`), for the sampling profiler.

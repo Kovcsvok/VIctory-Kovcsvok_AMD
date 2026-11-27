@@ -46,8 +46,12 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
             done.insert(key);
         }
     }
-    let bad = std::fs::read_to_string(&bad_file).unwrap_or_default();
-    let bad: HashSet<&str> = bad.lines().filter_map(|l| l.split(' ').next()).collect();
+    // Crashes under another translation or driver are tried again
+    // (`known::bad_keys`).
+    let (bad, stale) = known::bad_keys(&std::fs::read_to_string(&bad_file).unwrap_or_default(), &fingerprint);
+    if stale > 0 {
+        println!("{stale} crashes in warm-bad.txt were under another translation or driver: those pipelines are tried again");
+    }
     let early = std::fs::read_to_string(dir.join("early-pipelines.txt")).unwrap_or_default();
     let early: HashSet<&str> = early.lines().collect();
     // Those earlier runs drew with first, the others in no order (by key).
@@ -93,7 +97,7 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         },
         |n, why| {
             println!("pipeline {n} {}: {why}", keys[n]);
-            let _ = writeln!(lock(&bad_out), "{} {why}", keys[n]);
+            let _ = writeln!(lock(&bad_out), "{}", known::bad_line(&keys[n], &fingerprint, &why));
             lock(&state).2 += 1;
         },
     )?;
