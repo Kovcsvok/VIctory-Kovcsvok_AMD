@@ -1,6 +1,6 @@
 # Reports: index with English summaries
 
-The reports themselves are in Hungarian; new reports are written in English. Each one is one measurement or decision, in order. Times are local (CET).
+Claude-01 … Claude-29 are in English (translated on 27 November; the originals were Hungarian). The C1 decision and the notes from Codex and Antigravity are still being translated. Each one is one measurement or decision, in order. Times are local (CET).
 
 Image and video links in the reports do not open here: this repository is text-only (see `docs/asset-policy.md`).
 
@@ -57,6 +57,7 @@ Image and video links in the reports do not open here: this repository is text-o
 | [Claude-26](Claude-26-20261127-1115.md) | The glasses clamp has no effect; the suspect for garbage faces is lost texture writes; Cal's beard is half missing. |
 | [Claude-27](Claude-27-20261127-1150.md) | Where the RAM goes: the driver memory of command lists (at least 1 MB each) and other programs; first fix, the shared prelude pool. (The real time was about 11:25.) |
 | [Claude-28](Claude-28-20261127-1155.md) | The RAM fix works (4–6 GB free instead of 1.5–2.5, no crude models); Cal's beard is not caused by the card steps; the common suspect for the beard, the garbage face and the tourist boat is lost writes into compressed textures; the video now closes when the window is closed. |
+| [Claude-29](Claude-29-20261127-1240.md) | Codex's staging cap saves about 128 MB; the lost texture writes carry no address in their view (words 10–14 are 0), so the address has to be followed elsewhere; the frame waits on the card for 20 ms (`CARD_STEPS_LEARN`), so neither the CPU nor the GPU is full; proposal: read the learned pages in place. |
 
 ## Notes from Codex and Antigravity
 
