@@ -1,106 +1,106 @@
-# VIctory-Kovcsvok_AMD: VIctory RX 9070 XT-n
+# VIctory-Kovcsvok_AMD: VIctory on an RX 9070 XT
 
-A [VIctory](https://github.com/Marvisak/VIctory) egy kompatibilitási réteg: egy Xbox Series játékot futtat közvetlenül Windowson, a felhasználó saját példányából. Ez az ág a [Belobug rx9070xt](https://github.com/Belobug/VIctory-Belobug-AMD/tree/rx9070xt) ágra épül, és **egyetlen gépre van hangolva és mérve: Radeon RX 9070 XT 16 GB, 32 GB RAM.**
+[VIctory](https://github.com/Marvisak/VIctory) is a compatibility layer that runs an Xbox Series title natively on Windows from the user's own copy. This branch builds on [Belobug's rx9070xt](https://github.com/Belobug/VIctory-Belobug-AMD/tree/rx9070xt) branch and is **tuned and measured on one machine: Radeon RX 9070 XT 16 GB with 32 GB of RAM.**
 
-**A repóban nincs a játékból semmi:** se fájl, se kód, se textúra, se képernyőkép. A játékból saját példány kell. A repónak nincs köze a játék fejlesztőjéhez vagy kiadójához.
+**This repository contains nothing from the game:** no files, code, textures or screenshots. You need your own copy of the game. It is not affiliated with or endorsed by the game's developer or publisher.
 
-> **Ha most veszed át (ember vagy AI):** olvasd el ezt a fájlt, utána a [HALADAS.md](HALADAS.md)-t, és a legutolsó jelentést ([Claude-28](haladas/jelentesek/Claude-28-20261127-1155.md)). A következő feladat lent, a [Mi a következő lépés](#mi-a-következő-lépés) részben van, kódhelyekkel együtt.
+> **If you are picking this up (human or AI):** read this file first, then [PROGRESS.md](PROGRESS.md), then the latest report ([Claude-28](progress/reports/Claude-28-20261127-1155.md), in Hungarian; English summaries of all reports are in the [report index](progress/reports/README.md)). The next task, with code locations, is under [What comes next](#what-comes-next).
 
-## Állapot: 2026. november 27.
+## Status: 27 November 2026
 
-**Mérve ezen a gépen:**
+**Measured on:**
 - Radeon RX 9070 XT 16 GB (RDNA4);
 - Core i5-14600KF;
 - 32 GiB DDR5;
 - Windows 11.
 
-**Profil:** Series S, 1080p kimenet, 512 px-es textúrakorlát, PC-s AMD FSR, ray tracing ki.
+**Profile:** Series S, 1080p output, 512 px texture cap, PC AMD FSR, ray tracing off.
 
-| Jelenet | Eredmény |
+| Scene | Result |
 |---|---|
-| Prológus: rablás, autós üldözés, főcím | **végigmegy**, összeomlás nélkül |
-| Átvezetők (iroda, beszélgetések) | 30 FPS (a játék saját korlátja) |
-| „Chapter 1” montázs | kb. 23 FPS |
-| Hajós küldetés, hajózás | **20–25 FPS** (medián 22–23) |
-| A játék memóriája | csúcson 27,3 GB saját; 11,1 GB VRAM; 7,5–9 GB megosztott |
-| Szabad RAM menet közben | 4–6 GB, ha a böngésző és a többi nagy program be van zárva |
+| Prologue: robbery, car chase, title card | **plays through**, no crash |
+| Cutscenes (office, dialogue) | 30 fps (the game's own cap) |
+| "Chapter 1" montage | about 23 fps |
+| Boat mission, sailing | **20–25 fps** (median 22–23) |
+| Game memory | peak 27.3 GB private, 11.1 GB VRAM, 7.5–9 GB shared |
+| Free RAM while playing | 4–6 GB, with the browser and other large programs closed |
 
-**Minimum: 32 GB RAM, és játék közben más nagy program ne fusson.** 1024 px-es textúrákkal a 32 GB nem elég.
+**Minimum: 32 GB of RAM, with no other large program running while playing.** With 1024 px textures, 32 GB is not enough.
 
-### Ami működik
+### What works
 
-- **Kép:** a PC-s AMD FSR Series S-ben is működik, tiszta képpel.
-- **Fák:** nem tűnnek el, nem villognak (`VICTORY_TWIN_MOVE`).
-- **Hajók és alakok:** nem nyúlnak meg (`VICTORY_CARD_STEPS_LEARN`).
-- **Arcok:** nem kékek (a 42 karakteres RT-feloldó shader kihagyva).
-- **Memória:**
-  - nincs 3–4 FPS-es szakasz és memóriahiány miatti összeomlás (512 px);
-  - a montázsban nincsenek durva, textúra nélküli alakok (`VICTORY_PRELUDE_POOL`).
-- **Mérés:** F9-cel videó, F8-cal jelölés, HUD órával; élő be/ki próba (`VICTORY_AB`).
+- **Picture:** PC AMD FSR works in the Series S profile as well, with a clean image.
+- **Trees:** no longer vanish or flicker (`VICTORY_TWIN_MOVE`).
+- **Boats and characters:** no longer stretch (`VICTORY_CARD_STEPS_LEARN`).
+- **Faces:** no longer blue (the 42 character ray-tracing resolve shaders are skipped).
+- **Memory:**
+  - no more 3–4 fps stretches or out-of-memory crashes (512 px textures);
+  - no crude, untextured figures in the montage (`VICTORY_PRELUDE_POOL`).
+- **Measuring:** F9 records video, F8 marks moments, the HUD shows a clock; switches can be toggled live (`VICTORY_AB`).
 
-### Ami még hibás
+### What is still wrong
 
-| Hiba | Ok | Állapot |
+| Problem | Cause | Status |
 |---|---|---|
-| Tarka, kockás foltok egyes arcokon; Cal szakálla és bajsza eltűnik; a turistahajó oldala távolról átlátszó; Lucia szemöldöke és szempillái furcsák | **Feltevés:** a játék a GPU-n maga ír tömörített (BC1/BC4/BC7) textúrákba, és ezek az írások nálunk elvesznek | **Következő feladat**, lásd lent |
-| A szemüvegek eget tükröznek | ismeretlen render-lépés; a `CS_UpdateHistory` utáni korlát nem segített | nyitott |
-| FPS hajózás közben 20–25 | a `CARD_STEPS_LEARN` képkockánként kb. 10–17 ms-ot vár | nyitott, a kép most fontosabb |
-| A RAM szűkös (26–27 GB) | állandó host-listák (kb. 1900), nézetforma-tár (legfeljebb 1 GB) | nyitott |
-| A felhők kicsit ugrálnak | nincs vizsgálva | nyitott |
+| Colourful blocky garbage on some faces; Cal's beard and moustache vanish; a tourist boat's side turns see-through at a distance; Lucia's eyebrows and eyelashes look wrong | **Suspected:** the game writes compressed (BC1/BC4/BC7) textures itself on the GPU, and those writes are lost here | **next task**, see below |
+| Glasses reflect the sky | an unknown render pass; a clamp after `CS_UpdateHistory` did not help | open |
+| 20–25 fps while sailing | `CARD_STEPS_LEARN` waits about 10–17 ms a frame | open; the picture comes first for now |
+| RAM is tight (26–27 GB for the game) | permanent host lists (about 1,900), the view-shape cache (up to 1 GB) | open |
+| Clouds jump a little | not looked into | open |
 
-A teljes történet a [HALADAS.md](HALADAS.md)-ben és a [jelentésekben](haladas/jelentesek) van.
+The full history is in [PROGRESS.md](PROGRESS.md) and in the [reports](progress/reports).
 
-## Mi új ebben az ágban
+## What is new in this branch
 
-A Belobug `cd8dfc06`-hoz képest egy commit (`643a55a`), 24 fájl. Minden új viselkedés kapcsolóhoz kötött.
+Compared with Belobug's `cd8dfc06`: one commit (`643a55a`), 24 files. All new behaviour is behind switches.
 
-**Saját fejlesztések:**
+**Our own:**
 
-| Kapcsoló / funkció | Mit csinál | A profilban |
+| Switch / feature | What it does | In the measured profile |
 |---|---|---|
-| `VICTORY_TWIN_MOVE` | A fák kiválogatásának (`CS_Tree_BatchCull`) ikernézetei nem lesznek null-ok: nem a szál saját munkahelyén készülnek, ezért áthelyezzük őket (`descriptor/host.rs`) | **be** (a kódban is alapból) |
-| `VICTORY_PRELUDE_POOL` | A host-listák előtét-listái közös, legfeljebb 192 darabos készletből jönnek. Az AMD-meghajtó listánként legalább 1 MB megosztott memóriát foglal, és nem adja vissza: 1909 helyett 432 előtét, kb. 1 GB-tal kevesebb (`host.rs`, `list.rs`) | **be** (a kódban alapból ki) |
-| `VICTORY_LIST_IDLE_MOST` | a tétlen host-listák felső száma (alap 512) | nincs megadva |
-| `VICTORY_REFLECT_HOLD` | a szemüvegpróba korlátja; mérve hatástalan | ki |
-| F9-es videó (`record.rs`) | H.264 MP4 a futás mappájába (`VICTORY_RECORD_DIR`), a HUD órájával. Az ablak bezárásakor is lezárul (`lifecycle.rs` → `end_recording`). | mindig |
-| Napló | az elveszett BC-textúra-írások nézetének mind a 16 szava; memóriasorok (előtétek, készlet, host-listák) a `copystat.rs`-ben | a `diagnostics` buildben |
-| HUD | `AB` sor az élő próbához, további panelsorok (`host/panel.rs`) | `VICTORY_PANEL=1` |
+| `VICTORY_TWIN_MOVE` | The twin views of the tree culling pass (`CS_Tree_BatchCull`) no longer become null: they were made outside the thread's own workspace, so they are moved (`descriptor/host.rs`) | **on** (on by default in code too) |
+| `VICTORY_PRELUDE_POOL` | Host lists take their prelude lists from a shared pool of at most 192 spare ones. AMD's driver keeps at least 1 MB of shared memory per command allocator and does not give it back: 432 preludes instead of 1,909, about 1 GB less (`host.rs`, `list.rs`) | **on** (off by default in code) |
+| `VICTORY_LIST_IDLE_MOST` | cap on idle host lists (default 512) | not set |
+| `VICTORY_REFLECT_HOLD` | the glasses-test clamp; measured with no effect | off |
+| F9 video (`record.rs`) | H.264 MP4 into the run's folder (`VICTORY_RECORD_DIR`), with the HUD clock in the picture. Closed properly even when the window is closed (`lifecycle.rs` → `end_recording`). | always |
+| Logging | all 16 words of the views behind lost BC texture writes; memory lines in `copystat.rs` (preludes, pool, host lists) | `diagnostics` builds |
+| HUD | an `AB` line for live A/B tests, more panel lines (`host/panel.rs`) | `VICTORY_PANEL=1` |
 
-**Más forkokból átvéve:**
+**Taken from other forks:**
 - avatarmanz [PR 430](https://github.com/avatarmanz/VIctory-7900XTX/pull/430) (`VICTORY_WARM_BAD`);
-- avatarmanz [PR 434](https://github.com/avatarmanz/VIctory-7900XTX/pull/434), átalakítva (`VICTORY_CARD_STEPS_LEARN`);
-- avatarmanz [PR 437](https://github.com/avatarmanz/VIctory-7900XTX/pull/437) (`VICTORY_TWIN_EXACT`): **ezen a kártyán összeomlik, ne kapcsold be**;
-- upstream fix/popin `7ab13ed`: itt lassít, ezért ki (`VICTORY_PORT_CONSTANTS_ORDER=0`);
+- avatarmanz [PR 434](https://github.com/avatarmanz/VIctory-7900XTX/pull/434), adapted (`VICTORY_CARD_STEPS_LEARN`);
+- avatarmanz [PR 437](https://github.com/avatarmanz/VIctory-7900XTX/pull/437) (`VICTORY_TWIN_EXACT`): **crashes on this card, do not turn it on**;
+- upstream fix/popin `7ab13ed`: slower here, so off (`VICTORY_PORT_CONSTANTS_ORDER=0`);
 - Belobug `f962387` (RDNA4 `GetDimensions`);
-- a DexNom-féle PC-s FSR Series S-ben is (`VICTORY_FSR_PC`, `VICTORY_FSR_SHARPNESS`, `VICTORY_FSR_DLL`).
+- DexNom's PC FSR, here in the Series S profile too (`VICTORY_FSR_PC`, `VICTORY_FSR_SHARPNESS`, `VICTORY_FSR_DLL`).
 
-## Fordítás és indítás
+## Building and running
 
-**Kell hozzá:**
-- Windows 10/11 x64, AVX2-es processzor;
-- Direct3D 12 videokártya, Shader Model 6.6 és mesh shaderek;
-- Rust (a verzió rögzítve van), MSVC build tools;
-- a játék saját példánya.
+**You need:**
+- Windows 10/11 x64, a CPU with AVX2;
+- a Direct3D 12 GPU with Shader Model 6.6 and mesh shaders;
+- Rust (the toolchain is pinned) and the MSVC build tools;
+- your own copy of the game.
 
 ```powershell
 git clone https://github.com/Kovcsvok/VIctory-Kovcsvok_AMD
 cd VIctory-Kovcsvok_AMD
-copy victory.example.toml victory.toml      # állítsd be benne az útvonalakat (ezen a mappán kívülre)
+copy victory.example.toml victory.toml      # then set your paths, outside this folder
 cargo build --locked --profile diag -p victory --features diagnostics
 ```
 
-**Első indítás előtt** (mindkettő félbeszakítható és folytatható):
+**Before the first run** (both can be stopped and resumed later):
 
 ```powershell
-target\diag\victory.exe shaders <a játék shader-archívumai>   # minden shader lefordítva, percekig tart
-target\diag\victory.exe warm --used                          # pipeline-ok előre, új drivernél vagy buildnél
+target\diag\victory.exe shaders <the game's shader archives>   # translates every shader, takes minutes
+target\diag\victory.exe warm --used                            # builds pipelines ahead, after a new driver or build
 ```
 
-**PC-s FSR:** a `VICTORY_FIDELITYFX_DIR` mutasson arra a mappára, amelyben az AMD aláírt `amd_fidelityfx_upscaler_dx12.dll`-je van ([FidelityFX SDK, `Kits/FidelityFX/signedbin`](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/v2.4.0/Kits/FidelityFX/signedbin)).
+**PC FSR:** point `VICTORY_FIDELITYFX_DIR` at the folder with AMD's signed `amd_fidelityfx_upscaler_dx12.dll` ([FidelityFX SDK, `Kits/FidelityFX/signedbin`](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/v2.4.0/Kits/FidelityFX/signedbin)).
 
-### A mért profil (az `1`-es menü) kézzel
+### The measured profile (menu option `1`) by hand
 
-A mérésekhez a [`haladas/eszkozok/Inditas-Csomag.cmd`](haladas/eszkozok/Inditas-Csomag.cmd) menüje és a [`meres-csomag.ps1`](haladas/eszkozok/meres-csomag.ps1) indít. Ezek a `C:\Games\NOT_GTAVI` mappaszerkezetet várják. A játékmappa neve helyett `<JATEKMAPPA>` áll bennük. Ugyanaz kézzel:
+The measurements are started by the menu in [`progress/tools/Inditas-Csomag.cmd`](progress/tools/Inditas-Csomag.cmd) and by [`meres-csomag.ps1`](progress/tools/meres-csomag.ps1). Both expect the `C:\Games\NOT_GTAVI` folder layout and have `<JATEKMAPPA>` in place of the game folder's name; their comments and messages are in Hungarian. The same by hand:
 
 ```powershell
 $s = @{
@@ -112,117 +112,103 @@ $s = @{
   VICTORY_PORT_CBV='1'; VICTORY_PORT_GUARD='1'; VICTORY_PORT_JOURNAL='1'; VICTORY_PANEL='1'
   VICTORY_PIPELINE_BOOK='1'; VICTORY_TEXTURE_MAX='512'; VICTORY_TEXTURE_LOOK_MS='250'
   VICTORY_PORT_CONSTANTS_ORDER='0'; VICTORY_PRELUDE_POOL='1'
-  VICTORY_FIDELITYFX_DIR='<az FSR dll mappája>'; VICTORY_RECORD_DIR='<ide kerül az F9-es videó>'
+  VICTORY_FIDELITYFX_DIR='<folder of the FSR dll>'; VICTORY_RECORD_DIR='<where F9 videos go>'
 }
-$s.VICTORY_SKIP_PIPELINES = (Get-Content haladas\eszkozok\rt-feloldo-shaderek.txt | Where-Object { $_ -match '^[0-9a-f]{16}$' }) -join ','
+$s.VICTORY_SKIP_PIPELINES = (Get-Content progress\tools\rt-feloldo-shaderek.txt | Where-Object { $_ -match '^[0-9a-f]{16}$' }) -join ','
 foreach ($k in $s.Keys) { Set-Item "Env:$k" $s[$k] }
 $env:RUST_LOG = 'info'
-target\diag\victory.exe run "<a játék exe-je>" --execute --console series-s
+target\diag\victory.exe run "<the game's executable>" --execute --console series-s
 ```
 
-**Játék közben:**
-- **F3:** a HUD ki és be;
-- **F9:** videó indul / áll le;
-- **F8:** jelölés (csak a mérőindítóval, `jelolo.ps1`).
+**While playing:**
+- **F3:** HUD on/off;
+- **F9:** video recording start/stop;
+- **F8:** mark a moment (only with the measuring launcher, `jelolo.ps1`).
 
-A fiókválasztó csak kontrollerre reagál. A felső mappa `scripts\play.ps1`-je az eredeti (avatarmanz/Belobug) indító. Mi nem azzal mérünk.
+The account picker only reacts to a controller. `scripts\play.ps1` at the top level is the base's (avatarmanz/Belobug) launcher; we do not measure with it.
 
-## Mi a következő lépés
+## What comes next
 
-### 1. Az elveszett tömörített-textúra-írások (most ez a legfontosabb)
+### 1. Lost writes into compressed textures (the most important now)
 
-**Mi látszik:**
-- A napló ismétlődő figyelmeztetése: `placed unordered texture view not mirrored (null: writes through it are lost)`. Egy 6 perces menetben több mint 8000.
-- A formátumok: 71 BC1_UNORM, 72 BC1_UNORM_SRGB, 80 BC4_UNORM, 98 BC7_UNORM; 32–1024 px, teljes mip-lánccal.
-- Időben egybeesik a hibákkal: 4096 írásnál ott a tarka arc a videón.
+**What we see:**
+- A repeated warning in the log: `placed unordered texture view not mirrored (null: writes through it are lost)`, more than 8,000 times in a 6-minute run.
+- The formats: 71 BC1_UNORM, 72 BC1_UNORM_SRGB, 80 BC4_UNORM, 98 BC7_UNORM; 32–1024 px, with full mip chains.
+- The timing matches the problems: the count passed 4,096 exactly while the garbage face was on screen.
 
-**Hol van a kódban:**
+**Where it is in the code:**
 
-| Hely | Mi van ott |
+| Place | What is there |
 |---|---|
-| `crates/victory-gpu/src/descriptor.rs`, `create_placed_uav` / `create_placed_srv` | A játék 0x238 és 0x230 eszközmetódusai: elhelyezett memória nézetei, `(resource desc [14 szó], view desc [16 szó], handle)` |
-| `crates/victory-gpu/src/descriptor/host.rs`, `View::Placed` ág (keresd a figyelmeztetés szövegét) | Itt kap a textúrára mutató író nézet null-t |
-| `placed_texture()` → `crate::resource::texture_at(address, resource)` | Az **olvasó** nézetek így kapják meg a memóriához készített host-textúrát. A cím a nézetleírás 10–11. szavában van. |
-| `crates/victory-gpu/src/texback.rs` | a GPU által írt textúrák visszamásolása a játék memóriájába |
+| `crates/victory-gpu/src/descriptor.rs`, `create_placed_uav` / `create_placed_srv` | The game's device methods 0x238 and 0x230: views of memory it placed itself, `(resource desc [14 words], view desc [16 words], handle)` |
+| `crates/victory-gpu/src/descriptor/host.rs`, the `View::Placed` branch (search for the warning text) | This is where a writable view of such a texture gets a null view |
+| `placed_texture()` → `crate::resource::texture_at(address, resource)` | How **shader (read) views** find the host texture made for that memory; the address is in words 10–11 of the view description |
+| `crates/victory-gpu/src/texback.rs` | copying textures the GPU wrote back into the game's memory |
 
-**A nyitott kérdés:**
-- Az **író** nézetekben a 10–11. szó 0, ezért nem tudjuk, melyik textúra az.
-- A mostani build ezért a nézet mind a 16 szavát naplózza.
-- **Kell egy menet, amely betölt egy jelenetet**; elég a mentés betöltése és az első átvezető.
+**The open question:**
+- In the **writable** views, words 10–11 are 0, so we do not yet know which texture they belong to.
+- The current build therefore logs all 16 words of each such view.
+- **A run that loads a scene is needed**; loading the save and reaching the first cutscene is enough.
 
-**A terv:**
-1. Ha megvan a cím: minden (textúra, mip) író nézethez egy tömörítetlen „blokk-iker” textúra, negyed szélességgel és magassággal. BC1/BC4-hez `R32G32_UINT` (8 bájtos blokk), BC5/BC7-hez `R32G32B32A32_UINT` (16 bájtos blokk).
-2. Az író nézet az ikerre mutat. A dispatch-ek után `CopyTextureRegion` másol az ikerből a BC-textúrába.
-3. **Ellenőrizendő:** pontosan mit enged a D3D12 a BC és az azonos blokkméretű tömörítetlen formátum közötti másolásnál. A másik út a „relaxed format casting” (`D3D12_OPTIONS12`) castolható formátumlistával.
-4. Kapcsoló: `VICTORY_BC_WRITES`. Élő A/B-vel kell mérni ugyanabban a jelenetben: a tarka arc, Cal szakálla, a turistahajó.
+**The plan:**
+1. Once the address is known: for each (texture, mip) writable view, an uncompressed "block twin" texture at a quarter of the width and height. `R32G32_UINT` for BC1/BC4 (8-byte blocks), `R32G32B32A32_UINT` for BC5/BC7 (16-byte blocks).
+2. The writable view points at the twin. After the dispatches, `CopyTextureRegion` copies from the twin into the BC texture.
+3. **To be checked:** exactly what D3D12 allows when copying between a BC format and an uncompressed format of the same block size. The alternative is relaxed format casting (`D3D12_OPTIONS12`) with a castable-format list.
+4. Switch: `VICTORY_BC_WRITES`. Measure it with live A/B in the same scene: the garbage face, Cal's beard, the tourist boat.
 
-### 2. A szemüveg
+### 2. The glasses
 
-**Kizárva:** a `sr_denoising:CS_UpdateHistory` (`Role::Reflect`) korlátja; mérve hatástalan, Claude-26.
+**Ruled out:** a clamp after `sr_denoising:CS_UpdateHistory` (`Role::Reflect`); measured with no effect (Claude-26).
 
-**Következő:** a tükröző render-lépés megkeresése a képkocka-felvétel és visszajátszás eszközével ([docs/replay.md](docs/replay.md)).
+**Next:** find the reflecting render pass with the frame record and replay tools ([docs/replay.md](docs/replay.md)).
 
-### 3. FPS hajózás közben
+### 3. Frame rate while sailing
 
-A `crates/victory-gpu/src/host/card_steps.rs` `late` modulja (`LEARN`) a megtanult lapokra vár: képkockánként kb. 3,8 beküldés, 16–17 ms. Ötlet: finomabb, pufferenkénti tanulás.
+The `late` module of `crates/victory-gpu/src/host/card_steps.rs` (`LEARN`) waits on learned pages: about 3.8 submissions a frame, 16–17 ms. Idea: finer, per-buffer learning.
 
 ### 4. RAM
 
-- `list.rs`: minden játéklista beküldése után azonnal új, nyitott host-lista jár neki (kb. 1900 él). Ha ezt lustán kapná, 1–2 GB-tal kevesebb lehetne.
-- `descriptor/host.rs`: a tárolt nézetformák (`SHAPES`, legfeljebb `1<<22`, kb. 1 GB).
-- `VICTORY_RESIDENCY=1` csak `VICTORY_BURY_LAG=64`-gyel, mert 16-tal eszközvesztés jött.
+- `list.rs`: every game list gets a fresh, open host list right after it is submitted (about 1,900 alive). Handing them out lazily could save 1–2 GB.
+- `descriptor/host.rs`: the cache of view shapes (`SHAPES`, capped at `1<<22`, about 1 GB).
+- `VICTORY_RESIDENCY=1` only together with `VICTORY_BURY_LAG=64`; with 16 it caused device losses.
 
-## Hogyan dolgozunk (ezt tartsd meg)
+## How we work (please keep this)
 
-1. **Semmi a játékból nem kerül a repóba:** fájl, shader-dump, képernyőkép, videó, napló sem ([docs/asset-policy.md](docs/asset-policy.md)).
-2. **Minden új viselkedés `VICTORY_...` kapcsoló mögé kerül,** a kódban alapból kikapcsolva. A profil (az indító) kapcsolja be, ha a mérés igazolta.
-3. **Mérés nélkül nincs döntés:**
-   - a mérőindító menete naplót, másodpercenkénti memóriamintát és jelöléseket ír;
-   - F9-es videó készül;
-   - két változat élő A/B-vel kerül egy menetbe (`VICTORY_AB=<mp>,<kapcsoló>`).
-4. **Minden mérésről jelentés** kerül a [`haladas/jelentesek`](haladas/jelentesek)-be, és egy dátumozott sor a [buildfigyelőbe](haladas/tervek/VIctory-buildfigyelo.md).
-5. **Tesztek:** `cargo test --locked -p victory-gpu --lib <modul>::` (például `list::`). A játékkal való próbához a `diag` build kell.
+1. **Nothing from the game goes into the repository:** no files, shader dumps, screenshots, videos or logs ([docs/asset-policy.md](docs/asset-policy.md)).
+2. **All new behaviour sits behind a `VICTORY_...` switch,** off by default in code. The profile (the launcher) turns it on once a measurement has shown it helps.
+3. **No decision without a measurement:**
+   - a launcher run writes the log, a memory sample every second and the marks;
+   - an F9 video is recorded;
+   - two variants go into the same run with live A/B (`VICTORY_AB=<seconds>,<switch>`).
+4. **Every measurement gets a report** in [`progress/reports`](progress/reports) and a dated line in the [build watcher](progress/plans/VIctory-buildfigyelo.md). New reports and overviews in this repository are written in English; the older ones are in Hungarian.
+5. **Tests:** `cargo test --locked -p victory-gpu --lib <module>::` (for example `list::`). Trying it with the game needs the `diag` build.
 
-## Fájltérkép
+## File map
 
-| Hol | Mi |
+| Where | What |
 |---|---|
-| `crates/victory-gpu/src/host.rs` | host-listák, előtétek, `PRELUDE_POOL` |
-| `crates/victory-gpu/src/list.rs` | a listák életciklusa, tétlen készlet |
-| `crates/victory-gpu/src/host/card_steps.rs` | csónak-lépések, `LEARN` |
-| `crates/victory-gpu/src/descriptor/host.rs` | nézetek, elhelyezett textúrák, ikernézetek (`TWIN_MOVE`) |
-| `crates/victory-gpu/src/record.rs` | F9-es videó |
-| `crates/victory-gpu/src/ab.rs`, `host/panel.rs` | élő A/B, HUD |
-| `crates/victory-gpu/src/copystat.rs` | a napló összesítő sorai |
-| `crates/victory-hle/src/modules/lifecycle.rs` | kilépés |
-| `crates/victory-hle/src/modules/fidelityfx.rs`, `apps/victory/src/run.rs` | PC-s FSR |
-| `HALADAS.md`, `haladas/` | haladás, jelentések, tervek, mérőeszközök |
-| `docs/README-7900XTX-alap.md` | az alap (avatarmanz 7900 XTX) eredeti README-je: kapcsolók, parancsok, háttér |
+| `crates/victory-gpu/src/host.rs` | host lists, preludes, `PRELUDE_POOL` |
+| `crates/victory-gpu/src/list.rs` | list life cycle, the idle pool |
+| `crates/victory-gpu/src/host/card_steps.rs` | card steps, `LEARN` |
+| `crates/victory-gpu/src/descriptor/host.rs` | views, placed textures, twin views (`TWIN_MOVE`) |
+| `crates/victory-gpu/src/record.rs` | F9 video |
+| `crates/victory-gpu/src/ab.rs`, `host/panel.rs` | live A/B, HUD |
+| `crates/victory-gpu/src/copystat.rs` | the log's summary lines |
+| `crates/victory-hle/src/modules/lifecycle.rs` | process exit |
+| `crates/victory-hle/src/modules/fidelityfx.rs`, `apps/victory/src/run.rs` | PC FSR |
+| `PROGRESS.md`, `progress/` | progress, reports, plans, measuring tools |
+| `docs/README-7900XTX-alap.md` | the base's (avatarmanz, 7900 XTX) original README: switches, commands, background |
 
-## In English, briefly
+## Credits
 
-A fork of VIctory tuned and measured on **one machine: RX 9070 XT 16 GB, i5-14600KF, 32 GB RAM** (Series S profile, 512 px textures, PC AMD FSR). It plays through the prologue and the boat mission: 30 fps in cutscenes, 20–25 fps while sailing, with no crashes.
+This builds on other people's work. The history is kept, and commits taken from elsewhere name their source and author.
+- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its contributors: the loader, the runtime services, the Direct3D 12 back end and the shader recompiler.
+- **[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX):** the renderer ports, PRs 430, 434 and 437.
+- **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD):** the `rx9070xt` branch (RX 9070 XT fixes, HUD, flicker fix).
+- **[DexNom/VIctory](https://github.com/DexNom/VIctory):** the PC FidelityFX FSR bridge, ray-tracing fixes.
+- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**, **[myokex/victory-amd](https://github.com/myokex/victory-amd)**, **Geckomacabre**, **cxy0072019-sketch**, **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**: see the base's README.
+- This branch's changes were made with [Claude Code](https://claude.com/claude-code), coordinated with Codex, alongside Antigravity's parallel branch.
 
-**Fixed here:**
-- vanishing trees (`VICTORY_TWIN_MOVE`);
-- stretching boats and characters (`CARD_STEPS_LEARN`);
-- blue faces (character RT resolve skipped);
-- memory (`VICTORY_PRELUDE_POOL`: AMD's driver keeps at least 1 MB of shared memory per command allocator).
+## License
 
-**Next:** the title writes BC1/BC4/BC7 textures through UAVs, and those writes are lost here. This is the suspect for garbage faces, missing beards and see-through far boats. The plan is an uncompressed "block twin" plus a copy into the BC texture, behind `VICTORY_BC_WRITES`.
-
-The progress log (in Hungarian) is in [HALADAS.md](HALADAS.md). The base's original README is in [docs/README-7900XTX-alap.md](docs/README-7900XTX-alap.md).
-
-## Köszönet
-
-Ez mások munkájára épül; a történet megmaradt, az átvett commitok megnevezik a forrásukat és a szerzőjüket.
-- **[VIctory](https://github.com/Marvisak/VIctory):** Marvisak és a közreműködők. A betöltő, a futtatókörnyezet, a Direct3D 12 háttér és a shader-fordító.
-- **[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX):** a renderer-portok, PR 430, 434, 437.
-- **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD):** az `rx9070xt` ág (RX 9070 XT-javítások, HUD, villódzásjavítás).
-- **[DexNom/VIctory](https://github.com/DexNom/VIctory):** a PC-s FidelityFX FSR-híd, RT-javítások.
-- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**, **[myokex/victory-amd](https://github.com/myokex/victory-amd)**, **Geckomacabre**, **cxy0072019-sketch**, **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**: lásd az alap README-jét.
-- Az ág változtatásai [Claude Code](https://claude.com/claude-code)-dal készültek; a koordinálás Codexszel, Antigravity párhuzamos ágával.
-
-## Licenc
-
-GPL-3.0-or-later, mint a VIctory. Lásd [LICENSE](LICENSE). Az egyetlen kivétel a [docs/asset-policy.md](docs/asset-policy.md)-ben szerepel.
+GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file that is not covered is named in [docs/asset-policy.md](docs/asset-policy.md).
