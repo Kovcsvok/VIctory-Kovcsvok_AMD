@@ -46,7 +46,7 @@
 #   -KartyaLepes 'be' (alap) = VICTORY_CARD_STEPS=2 (a csomag gyorsítása: a beküldés lépései a kártyán);
 #             'ki' = nincs (a pontos, régi várakozás, lassabb): ellenőrzés, hogy Cal féloldalas szakálla
 #             (Claude-26) a kártyás lépésekből jön-e
-#   -ListaKeszlet 'be' (alap, 11-27 11:50 óta) = VICTORY_PRELUDE_POOL=1: a parancslisták előtét-listái futás
+#   -ListaKeszlet 'be' (alap, 11-27 11:25 óta) = VICTORY_PRELUDE_POOL=1: a parancslisták előtét-listái futás
 #             után egy közös, legfeljebb 192 darabos készletbe kerülnek. Ezen a kártyán minden lista legalább 1 MB
 #             megosztott RAM-ot foglal; a 10:52-es menetben 1909 előtét élt, a próbán 292 (kb. 1-1,5 GB-tal
 #             kevesebb, Claude-27); 'ki' = a régi mód
