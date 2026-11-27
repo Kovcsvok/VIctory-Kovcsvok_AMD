@@ -445,15 +445,26 @@ struct Asked {
     started: std::time::Instant,
 }
 
-/// `<from s>[+<from s>..],<frames>,<file>`, or a file alone.
+/// `<from s>[+<from s>..],<frames>,<file>`, or a file alone; a `<from
+/// s>x<n>` stands for n recordings from then on (one after another).
 fn parse(text: &str) -> (Option<(Vec<f64>, u64)>, &str) {
+    fn times(part: &str) -> Option<Vec<f64>> {
+        let part = part.trim();
+        match part.split_once('x') {
+            Some((from, n)) => {
+                let (from, n) = (from.trim().parse::<f64>().ok()?, n.trim().parse::<usize>().ok()?);
+                Some(vec![from; n.min(1000)])
+            }
+            None => Some(vec![part.parse::<f64>().ok()?]),
+        }
+    }
     let mut parts = text.splitn(3, ',');
     let three = (parts.next(), parts.next(), parts.next());
     if let (Some(from), Some(frames), Some(file)) = three
-        && let Ok(from) = from.split('+').map(|f| f.trim().parse::<f64>()).collect::<Result<Vec<f64>, _>>()
+        && let Some(from) = from.split('+').map(times).collect::<Option<Vec<Vec<f64>>>>()
         && let Ok(frames) = frames.trim().parse::<u64>()
     {
-        return (Some((from, frames)), file);
+        return (Some((from.concat(), frames)), file);
     }
     (None, text)
 }
@@ -489,6 +500,63 @@ pub(super) fn wanted() -> bool {
     asked().is_some()
 }
 
+/// `VICTORY_TIMELINE_SLOW=<ms>`: a recording begins at the first frame
+/// that came at least that long after the one before (once its time has
+/// come), not at once.
+fn slow_ms() -> Option<f64> {
+    static SLOW: OnceLock<Option<f64>> = OnceLock::new();
+    *SLOW.get_or_init(|| {
+        std::env::var("VICTORY_TIMELINE_SLOW").ok().and_then(|v| v.trim().parse::<f64>().ok()).filter(|&ms| ms > 0.0)
+    })
+}
+
+/// What else begins a recording, past its time (the long-play watch,
+/// Claude-35): `VICTORY_TIMELINE_LOW=<ms>`, frames that came that long after
+/// the one before on average over the last [`LOW_FRAMES`] (a scene that runs
+/// slow, not one hitch); `VICTORY_TIMELINE_MARKS=<file>`, the file growing
+/// (the F8 marker writes a line at each press: the user saw something);
+/// `VICTORY_TIMELINE_GAP=<s>`, at least that long after the last recording
+/// before a hitch or a slow scene begins one (a mark does not wait);
+/// `VICTORY_TIMELINE_JSON_MOST=<n>`, the trace file for the first n
+/// recordings only (the summary for every one: some 70 KB against 15 MB).
+struct Watch {
+    low_ms: Option<f64>,
+    marks: Option<std::path::PathBuf>,
+    gap_s: f64,
+    json_most: usize,
+}
+
+const LOW_FRAMES: usize = 30;
+
+fn watch() -> &'static Watch {
+    static WATCH: OnceLock<Watch> = OnceLock::new();
+    WATCH.get_or_init(|| {
+        let number = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<f64>().ok());
+        Watch {
+            low_ms: number("VICTORY_TIMELINE_LOW").filter(|&ms| ms > 0.0),
+            marks: std::env::var_os("VICTORY_TIMELINE_MARKS").filter(|v| !v.is_empty()).map(Into::into),
+            gap_s: number("VICTORY_TIMELINE_GAP").unwrap_or(0.0).max(0.0),
+            json_most: number("VICTORY_TIMELINE_JSON_MOST").map_or(usize::MAX, |n| n as usize),
+        }
+    })
+}
+
+/// Whether the marks file grew since it was last looked at (at most four
+/// times a second).
+fn marked(file: &std::path::Path) -> bool {
+    static LOOKED: Mutex<(Option<std::time::Instant>, u64)> = Mutex::new((None, u64::MAX));
+    let mut looked = LOOKED.lock().unwrap_or_else(|e| e.into_inner());
+    if looked.0.is_some_and(|at| at.elapsed().as_millis() < 250) {
+        return false;
+    }
+    looked.0 = Some(std::time::Instant::now());
+    let len = std::fs::metadata(file).map_or(0, |m| m.len());
+    // The first look only learns the length.
+    let grew = looked.1 != u64::MAX && len > looked.1;
+    looked.1 = len;
+    grew
+}
+
 /// Where the recording is.
 struct Stage {
     ready: bool,
@@ -498,6 +566,13 @@ struct Stage {
     made: usize,
     writing: bool,
     before: Option<super::report::Threads>,
+    /// The last frames' gaps, ms (for `VICTORY_TIMELINE_LOW`), and where the
+    /// next goes.
+    gaps: [f64; LOW_FRAMES],
+    next_gap: usize,
+    /// When the last recording ended, and why the one under way began.
+    ended: Option<std::time::Instant>,
+    why: &'static str,
 }
 
 /// The title's present came back.
@@ -512,8 +587,23 @@ pub(crate) fn presented() {
         made: 0,
         writing: false,
         before: None,
+        gaps: [0.0; LOW_FRAMES],
+        next_gap: 0,
+        ended: None,
+        why: "time",
     });
+    // How long since the last present (for `VICTORY_TIMELINE_SLOW`).
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let gap_ms = {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let gap = last.map_or(0.0, |l| now.duration_since(l).as_secs_f64() * 1e3);
+        *last = Some(now);
+        gap
+    };
     let mut stage = STAGE.lock().unwrap_or_else(|e| e.into_inner());
+    let at = stage.next_gap;
+    (stage.gaps[at], stage.next_gap) = (gap_ms, (at + 1) % LOW_FRAMES);
     let Some(&after) = asked.after.get(stage.made) else {
         return;
     };
@@ -528,10 +618,30 @@ pub(crate) fn presented() {
         crate::host::timeline_ready();
         return;
     }
+    // With `VICTORY_TIMELINE_SLOW=<ms>` the recording waits, past its
+    // time, for a frame that came that long after the one before: the
+    // frames after it (a hitch comes in runs, Claude-32: eight of 480 ms
+    // in a row) are recorded.
+    let watch = watch();
+    let watching = slow_ms().is_some() || watch.low_ms.is_some() || watch.marks.is_some();
+    if !stage.began && watching {
+        let mark = watch.marks.as_deref().is_some_and(marked);
+        let rested = stage.ended.is_none_or(|t| t.elapsed().as_secs_f64() >= watch.gap_s);
+        let hitch = slow_ms().is_some_and(|slow| gap_ms >= slow);
+        let low = watch
+            .low_ms
+            .is_some_and(|low| stage.gaps.iter().sum::<f64>() / LOW_FRAMES as f64 >= low);
+        stage.why = match (mark, rested && hitch, rested && low) {
+            (true, ..) => "mark",
+            (_, true, _) => "hitch",
+            (_, _, true) => "low",
+            _ => return,
+        };
+    }
     if !stage.began {
         stage.began = true;
         stage.before = Some(super::report::Threads::now());
-        tracing::info!(file = %asked.file.display(), frames = asked.frames, "the timeline begins (VICTORY_TIMELINE)");
+        tracing::info!(file = %asked.file.display(), frames = asked.frames, why = stage.why, "the timeline begins (VICTORY_TIMELINE)");
         begin();
         if std::thread::Builder::new().name("victory-sample".into()).spawn(sample).is_err() {
             tracing::warn!("the timeline is without samples of the title's threads");
@@ -546,25 +656,30 @@ pub(crate) fn presented() {
     }
     stage.writing = true;
     let before = stage.before.take().unwrap_or_default();
-    // Several recordings: a file each.
-    let file = match asked.after.len() {
-        1 => asked.file.clone(),
-        _ => {
-            let end = asked.file.extension().map_or("json".into(), |e| e.to_string_lossy().into_owned());
-            asked.file.with_extension(format!("{after:.0}.{end}"))
+    // Several recordings: a file each (watched ones by the second they
+    // began at and why).
+    let kind = asked.file.extension().map_or("json".into(), |e| e.to_string_lossy().into_owned());
+    let file = match (asked.after.len(), watching) {
+        (1, false) => asked.file.clone(),
+        (_, false) => asked.file.with_extension(format!("{after:.0}.{kind}")),
+        (_, true) => {
+            let began = asked.started.elapsed().as_secs_f64();
+            asked.file.with_extension(format!("{began:.0}-{}.{kind}", stage.why))
         }
     };
+    let json = stage.made < watch.json_most;
     drop(stage);
     let write = move || {
         let after = super::report::Threads::now();
         // The spans under way at the last present end first.
         std::thread::sleep(std::time::Duration::from_millis(250));
         let data = end();
-        super::report::write(&file, data, &before, &after, crate::host::timeline_stamps());
+        super::report::write(&file, data, &before, &after, crate::host::timeline_stamps(), json);
         crate::host::timeline_restart();
         let mut stage = STAGE.lock().unwrap_or_else(|e| e.into_inner());
         (stage.began, stage.frames, stage.writing) = (false, 0, false);
         stage.made += 1;
+        stage.ended = Some(std::time::Instant::now());
     };
     if std::thread::Builder::new().name("victory-timeline".into()).spawn(write).is_err() {
         tracing::warn!("no thread to write the timeline");
@@ -674,5 +789,8 @@ mod tests {
         assert_eq!(parse("120+130.5,20,D:/a,b.json"), (Some((vec![120.0, 130.5], 20)), "D:/a,b.json"));
         assert_eq!(parse("D:/a,1,2.json"), (None, "D:/a,1,2.json"));
         assert_eq!(parse("D:/a.json"), (None, "D:/a.json"));
+        // n recordings from a second on, as many as the watch may make.
+        assert_eq!(parse("180x3,6,D:/a.json"), (Some((vec![180.0; 3], 6)), "D:/a.json"));
+        assert_eq!(parse("60+180x2,6,D:/a.json"), (Some((vec![60.0, 180.0, 180.0], 6)), "D:/a.json"));
     }
 }

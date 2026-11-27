@@ -5,6 +5,7 @@ param(
     [string]$MaxFps = 'alap',
     [ValidateSet('be', 'ki')]
     [string]$Port1 = 'be',
+    [string]$Ab = '',
     [switch]$Kepsor,
     [switch]$DryRun
 )
@@ -26,6 +27,11 @@ if ($MaxFps -eq 'alap' -or [string]::IsNullOrWhiteSpace($MaxFps)) {
     Remove-Item -Path Env:VICTORY_MAX_FPS -ErrorAction SilentlyContinue
 } else {
     $env:VICTORY_MAX_FPS = $MaxFps
+}
+if ([string]::IsNullOrWhiteSpace($Ab)) {
+    Remove-Item -Path Env:VICTORY_AB -ErrorAction SilentlyContinue
+} else {
+    $env:VICTORY_AB = $Ab.Trim()
 }
 
 if (-not (Test-Path -LiteralPath $AgyExe)) {
@@ -121,7 +127,7 @@ if ($Kepsor -and (Test-Path -LiteralPath $kepsorScript)) {
 $started = Get-Date
 $startedUtc = [DateTime]::UtcNow
 Write-Host ("Inditas: {0}" -f $dir) -ForegroundColor Cyan
-Write-Host ("Profil : Nev={0}, TexMax={1}, Sharp={2}, MaxFps={3}, Port1={4}, Kepsor={5}" -f $safeNev, $TexMax, $Sharp, $MaxFps, $Port1, ([bool]$Kepsor))
+Write-Host ("Profil : Nev={0}, TexMax={1}, Sharp={2}, MaxFps={3}, Port1={4}, Ab={5}, Kepsor={6}" -f $safeNev, $TexMax, $Sharp, $MaxFps, $Port1, $Ab, ([bool]$Kepsor))
 
 $rc = 1
 Push-Location $AgyTree
@@ -180,7 +186,7 @@ $summaryLines = @(
     "Exe           : $AgyExe",
     "Exe SHA-256   : $exeHash",
     "State mappa   : $AgyState",
-    "Opciok        : TexMax=$TexMax, Sharp=$Sharp, MaxFps=$MaxFps, Port1=$Port1, Kepsor=$([bool]$Kepsor)",
+    "Opciok        : TexMax=$TexMax, Sharp=$Sharp, MaxFps=$MaxFps, Port1=$Port1, Ab=$Ab, Kepsor=$([bool]$Kepsor)",
     "Pre-flight RAM: $availMb MB szabad RAM, $commitFreeGb GB szabad commit",
     "VICTORY env   : $victoryEnvSummary"
 )

@@ -771,6 +771,11 @@ pub mod known;
 mod library;
 #[cfg(windows)]
 mod make;
+/// First uses of pipelines not waited for again (`VICTORY_PIPELINE_WAIT_ONCE`).
+#[cfg(windows)]
+pub(crate) fn not_waited_again() -> u64 {
+    make::NOT_WAITED_AGAIN.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Lets the pipeline library's mapped file go from memory when no pipeline
 /// has loaded for a while (`library::trim`); called by the host's sweep.

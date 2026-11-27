@@ -58,6 +58,17 @@ Image and video links in the reports do not open here: this repository is text-o
 | [Claude-27](Claude-27-20261127-1150.md) | Where the RAM goes: the driver memory of command lists (at least 1 MB each) and other programs; first fix, the shared prelude pool. (The real time was about 11:25.) |
 | [Claude-28](Claude-28-20261127-1155.md) | The RAM fix works (4–6 GB free instead of 1.5–2.5, no crude models); Cal's beard is not caused by the card steps; the common suspect for the beard, the garbage face and the tourist boat is lost writes into compressed textures; the video now closes when the window is closed. |
 | [Claude-29](Claude-29-20261127-1240.md) | Codex's staging cap saves about 128 MB; the lost texture writes carry no address in their view (words 10–14 are 0), so the address has to be followed elsewhere; the frame waits on the card for 20 ms (`CARD_STEPS_LEARN`), so neither the CPU nor the GPU is full; proposal: read the learned pages in place. |
+| [Claude-30](Claude-30-20261127-1340.md) | Automatic A at the account picker (`VICTORY_AUTO_A`), and the 20 ms wait moved off the submitting thread (`VICTORY_LATE_FILLS`). |
+| [Claude-31](Claude-31-20261127-1640.md) | GPT's and Gravity's decisions: late constant buffers in place (ported, fixed, measured). |
+| [Claude-32](Claude-32-20261127-1730.md) | Lazy host lists: a submitted list gets a host list only when it is recorded again (RAM). |
+| [Claude-33](Claude-33-20261127-1815.md) | The memory jump at the first world load, frame hitches (pipeline waits), and the late high-detail models. |
+| [Claude-34](Claude-34-20261127-2155.md) | The RAM overflow in long play: buffer views of every size filled the view table. |
+| [Claude-35](Claude-35-20261127-2235.md) | A long-play measuring mode (menu option 0): memory, hitches, low FPS and F8 marks in one run. |
+| [Claude-36](Claude-36-20261127-2245.md) | Review of Antigravity's native DXR work (`agy-dxr-fast` 6a5c875, d1fa22a), read only. |
+| [Claude-37](Claude-37-20261127-2255.md) | The long run froze at 12.4 min: the heap-places report waited for itself (fixed). |
+| [Claude-38](Claude-38-20261127-2330.md) | The first full long run (23.7 min): no freeze, memory levels off at about 26.5 GB, the slow frames, three picture faults. |
+| [Claude-39](Claude-39-20261128-0005.md) | Low FPS: the card idles because the submitting thread waits 16 ms a frame for flights; two tries that did not help. |
+| [Claude-40](Claude-40-20261128-0010.md) | No other fork has fixed that wait; an unattended run pair for card copies (`kartya-par.ps1`, `futas-osszevetes.py`). |
 
 ## Notes from Codex and Antigravity
 

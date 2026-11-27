@@ -628,9 +628,20 @@ fn bury(finished: u64) {
             }
             retired.drain(..n).collect()
         };
-        drop(done);
+        // With `VICTORY_LANDED_EARLY` what landed lists named comes here,
+        // some thousand objects a frame: dropped by the helper thread
+        // ([`land`]), not by the thread that lands flights (in the 16:41
+        // run that thread spent 15 ms a frame more landing).
+        if landed_early() {
+            BURIED.lock().unwrap_or_else(|e| e.into_inner()).extend(done);
+        } else {
+            drop(done);
+        }
     }
 }
+
+/// What [`bury`] let go with [`landed_early`], for the helper thread to drop.
+static BURIED: Mutex<Vec<(u64, Retired)>> = Mutex::new(Vec::new());
 
 /// Objects [`retire`] dropped at once (no submission was running) and
 /// kept until a running submission finished, since the start.
@@ -2923,6 +2934,29 @@ fn line() -> std::sync::MutexGuard<'static, Line> {
     LINE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Whether flights in the air declared shader writes over `[from, to)`
+/// (their writes reach title memory when they land).
+pub(crate) fn flights_write(from: usize, to: usize) -> bool {
+    touches(&line().written, from, to)
+}
+
+/// For the memory line (Claude-31): host lists in flights on the card (sent
+/// ahead, not landed), and lists of landed flights not reset and given
+/// back yet.
+pub(crate) fn lists_in_line() -> (usize, usize) {
+    let line = line();
+    let flying = line
+        .line
+        .iter()
+        .map(|l| match l {
+            Late::Run(flight) => flight.lists.len(),
+            _ => 0,
+        })
+        .sum();
+    let landed = line.landed.iter().map(|(lists, _)| lists.len()).sum();
+    (flying, landed)
+}
+
 /// Why flights were settled ([`LATE_STATS`]' places from 2 on).
 const WHY_SYNC: usize = 2;
 const WHY_CARD_DONE: usize = 3;
@@ -3475,16 +3509,69 @@ pub(crate) fn settle_for_fence() {
     settle_now(WHY_FENCE);
 }
 
+/// `VICTORY_LANDED_EARLY=1` (off by default, Claude-31): the host lists of
+/// landed flights are reset and given back to the pool as soon as they
+/// have landed, and only what their commands named (deferred work and the
+/// objects it keeps, texture states, twins, scratch memory, batch buffers,
+/// upload memory, descriptor slots: [`HostList::take_named`]) waits the
+/// [`bury_lag`] it waited before ([`retire`]).
+///
+/// Why: in the 2026-11-27 16:33 run 803 of 1,959 host lists alive were
+/// those of the last 64 landed flights, waiting for that lag; each holds
+/// its command allocators' memory (a megabyte or more the card shares with
+/// the PC, kept over resets) and, with `VICTORY_PRELUDE_POOL`, its
+/// prelude. Their runs are over (they landed: the card has passed their
+/// fence), so the allocators may be reset; the lag was for the memory their
+/// commands named (the device losses of 2026-11-25 were page faults in
+/// memory nothing of ours named any more), and that still waits as long.
+fn landed_early() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_LANDED_EARLY").is_some_and(|v| v == "1"))
+}
+
 /// Resets the host lists of settled flights and keeps them for reuse, as
 /// a queue does for the lists it ran (`crate::list::recycle`).
 fn land() {
+    let early = landed_early();
+    if early {
+        let buried = std::mem::take(&mut *BURIED.lock().unwrap_or_else(|e| e.into_inner()));
+        drop(buried);
+    }
     let landed: Vec<_> = {
         let mut line = line();
-        let n = line.landed.len().saturating_sub(bury_lag() as usize);
+        let keep = if early { 0 } else { bury_lag() as usize };
+        let n = line.landed.len().saturating_sub(keep);
         line.landed.drain(..n).collect()
     };
     for (lists, order) in landed {
-        crate::list::recycle(lists, &order);
+        if early {
+            crate::list::recycle_early(lists, &order);
+        } else {
+            crate::list::recycle(lists, &order);
+        }
+    }
+}
+
+/// What a host list's commands named, taken out of it before an early reset
+/// ([`landed_early`]); dropped after [`bury_lag`] through [`retire`].
+pub(crate) struct Named {
+    _deferred: Deferred,
+    _states: States,
+    _twins: std::collections::HashMap<usize, TwinUse>,
+    /// Its chunks go back to the pool when this is dropped.
+    _scratch: Scratch,
+    _batch: BatchBack,
+}
+
+/// Batch argument buffers of a list, given back to their pool when dropped
+/// (as a reset gives them: only when no batch was left half done).
+struct BatchBack(Vec<ID3D12Resource>, u32);
+
+impl Drop for BatchBack {
+    fn drop(&mut self) {
+        if self.1 == 0 {
+            give_batch_buffers(std::mem::take(&mut self.0));
+        }
     }
 }
 
@@ -3897,6 +3984,8 @@ fn late_line(frames: f64) {
         );
     }
     card_steps::log(frames);
+    late_fills::log(frames);
+    crate::inplace::late_cbv_log(frames);
     crate::port::log(frames);
     crate::port_cbv::log(frames);
     crate::watch::port_guard_line(frames);
@@ -3934,6 +4023,7 @@ pub(crate) mod awake;
 mod card_steps;
 #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
 pub(crate) mod indirects;
+mod late_fills;
 mod panel;
 mod place;
 pub(crate) mod rec;
@@ -6014,8 +6104,22 @@ impl Host {
                 firsts.iter_mut().for_each(|first| *first += 1);
             }
             let cuts: Vec<usize> = parts.iter().filter_map(|&n| firsts.get(n).copied()).collect();
+            // Fills of pages the title writes late, done again by a thread of
+            // ours right before the card runs these lists (`late_fills`).
+            let gate = late_fills::gate(
+                &self.device,
+                &self.fence,
+                *submitted - 1,
+                this_submission,
+                own.as_ref().map_or(&[][..], |own| own.again()),
+            );
             // SAFETY: closed lists; the fence is ours.
             let signalled = unsafe {
+                if let Some((fence, value)) = &gate
+                    && let Err(e) = self.queue.Wait(fence, *value)
+                {
+                    tracing::warn!(error = %e, "late fills: the queue was not told to wait for the gate");
+                }
                 let mut from = 0;
                 for to in cuts.into_iter().chain([lists.len()]) {
                     self.queue.ExecuteCommandLists(&lists[from..to]);
@@ -6630,6 +6734,27 @@ impl HostList {
 
     /// Only after the list's last submission finished (every one is waited
     /// for).
+    /// What the list's commands named ([`Named`]), taken out: the list may
+    /// be reset at once ([`landed_early`]), and this is dropped later.
+    pub(crate) fn take_named(&self) -> Named {
+        let scratch = {
+            let mut s = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
+            Scratch { chunks: std::mem::take(&mut s.chunks), current: 0, used: 0 }
+        };
+        let batch = {
+            let mut a = self.batch_args.lock().unwrap_or_else(|e| e.into_inner());
+            let left = std::mem::take(&mut a.1);
+            BatchBack(std::mem::take(&mut a.0), left)
+        };
+        Named {
+            _deferred: std::mem::take(&mut *self.deferred()),
+            _states: std::mem::take(&mut *self.states.lock().unwrap_or_else(|e| e.into_inner())),
+            _twins: std::mem::take(&mut *self.twins.lock().unwrap_or_else(|e| e.into_inner())),
+            _scratch: scratch,
+            _batch: batch,
+        }
+    }
+
     pub(crate) fn reset(&self) {
         self.changed_something();
         #[cfg(feature = "diagnostics")]

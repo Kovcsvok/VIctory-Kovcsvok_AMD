@@ -771,7 +771,9 @@ pub(super) fn chrome(
 }
 
 /// Writes both files.
-pub(super) fn write(file: &std::path::Path, data: Data, before: &Threads, after: &Threads, stamps: Vec<(u64, u64)>) {
+/// Writes the summary beside `file` (`.txt`), and the trace to `file` if
+/// `json` (`VICTORY_TIMELINE_JSON_MOST`).
+pub(super) fn write(file: &std::path::Path, data: Data, before: &Threads, after: &Threads, stamps: Vec<(u64, u64)>, json: bool) {
     let mut names = Names::new();
     let (events, lost) = (data.events.len(), data.lost);
     let trace = Trace::new(data.events, &stamps);
@@ -781,6 +783,9 @@ pub(super) fn write(file: &std::path::Path, data: Data, before: &Threads, after:
     }
     let beside = file.with_extension("txt");
     let written = std::fs::write(&beside, text).and_then(|()| {
+        if !json {
+            return Ok(());
+        }
         let mut out = std::io::BufWriter::new(std::fs::File::create(file)?);
         chrome(&trace, &mut names, &data.stacks, after, &mut out)?;
         std::io::Write::flush(&mut out)
@@ -884,8 +889,11 @@ mod tests {
     }
 
     /// Real threads, real waits: what the wrappers record names who ended
-    /// them, and the chain leads to the thread that worked.
+    /// them, and the chain leads to the thread that worked. (Never inlined:
+    /// the samples' stacks are to name it, which an optimised build that
+    /// folds it into the test runner's closure does not.)
     #[test]
+    #[inline(never)]
     fn real_waits_are_recorded_with_who_ended_them() {
         use super::super::{hooks, record, span};
         use std::sync::{Arc, Condvar, Mutex};

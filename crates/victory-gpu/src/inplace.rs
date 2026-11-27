@@ -191,6 +191,7 @@ pub(crate) fn gone(window: bool, bytes: u64) {
 pub fn title_memory_freeing(at: usize, len: usize) {
     // Renderer port 1's regions there: no longer what the title shows.
     crate::port::forget(at, len);
+    forget_late_cbv_pages(at, len);
     if STATS[0].load(Ordering::Relaxed) + STATS[2].load(Ordering::Relaxed) == 0 {
         return;
     }
@@ -1309,6 +1310,219 @@ pub(crate) fn tick() {
     }
 }
 
+
+// --- Late constant buffers in place (`VICTORY_INPLACE_LATE_CBV`, Claude-31) ---
+
+/// A 64 KiB page of title memory opened as a heap of its own, with one
+/// buffer over all of it, for constant buffers the title writes after
+/// sending ([`register_late_cbv`]).
+struct LateCbvPage {
+    buffer: ID3D12Resource,
+    _heap: ID3D12Heap,
+    gpu: u64,
+}
+
+// SAFETY: D3D12 heaps and resources are free-threaded.
+unsafe impl Send for LateCbvPage {}
+unsafe impl Sync for LateCbvPage {}
+
+static LATE_CBV_PAGES: std::sync::RwLock<BTreeMap<usize, LateCbvPage>> = std::sync::RwLock::new(BTreeMap::new());
+
+/// The most pages opened (each locks 64 KiB of title memory into RAM).
+const LATE_CBV_MOST: usize = 1024;
+
+/// Pages opened and refused since the start; then, since the last line:
+/// constant buffers bound in place and their bytes; not bound because a
+/// flight in the air declared shader writes over them (mode 1); bound so
+/// all the same (mode 2); not bound because the slot could not take the
+/// view.
+static LATE_CBV_STATS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+
+/// `VICTORY_INPLACE_LATE_CBV` (off by default; from Antigravity's
+/// agy-9070-v2 141b746, with the fix GPT found):
+///
+/// Constant buffers on pages the title writes after the submission that
+/// reads them was sent (`card_steps::late`, `VICTORY_CARD_STEPS_LEARN`) are
+/// read by the card where the title has them: the page is opened as a heap
+/// of its own (`OpenExistingHeapFromAddress1` on 64 KiB of private memory,
+/// [`place_part`]) and the draw's slot is pointed into it. Then the
+/// submission has no fill of it, takes the title's bytes when the draw runs
+/// (as on the console) and has nothing to wait for.
+///
+/// The fix: the wait is left out only where the slot was really pointed in
+/// place. A buffer over two pages, a slot that cannot take the view, or (in
+/// mode 1) one under shader writes a flight in the air declared, keeps its
+/// fill, and the learned page makes that fill wait as before: nothing here
+/// changes what `card_steps::late` learns or when it waits.
+///
+/// `1`: not over ranges flights in the air declared shader writes over at
+/// recording (their writes reach title memory only when they land). `2`:
+/// those too (Antigravity's behaviour; the card may read the title's bytes
+/// from before a flight's shader wrote there). Live with `VICTORY_AB`.
+fn late_cbv_mode() -> u32 {
+    static MODE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("VICTORY_INPLACE_LATE_CBV").ok().as_deref().map(str::trim) {
+        Some("1") => 1,
+        Some("2") => 2,
+        _ => 0,
+    })
+}
+
+/// Whether pages are opened at all: the switch is set, or changes live.
+fn late_cbv_asked() -> bool {
+    #[cfg(feature = "diagnostics")]
+    if crate::ab::bit("VICTORY_INPLACE_LATE_CBV").is_some() {
+        return true;
+    }
+    late_cbv_mode() > 0
+}
+
+/// Whether draws point slots into the opened pages now.
+pub(crate) fn late_cbv_on() -> bool {
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick("VICTORY_INPLACE_LATE_CBV") {
+        return on;
+    }
+    late_cbv_mode() > 0
+}
+
+/// Whether a range flights in the air may write is left alone (mode 1).
+pub(crate) fn late_cbv_guarded() -> bool {
+    late_cbv_mode() != 2
+}
+
+/// The title was found writing `[from, to)` after sending: the 64 KiB
+/// pages over it are opened, where they can be (private memory committed
+/// whole, no view of a section, not too many).
+pub(crate) fn register_late_cbv(from: usize, to: usize) {
+    if from >= to || !late_cbv_asked() {
+        return;
+    }
+    let Some(host) = crate::host::host() else {
+        return;
+    };
+    let first = from & !(K64 - 1);
+    let Some(last) = to.checked_next_multiple_of(K64) else {
+        return;
+    };
+    let mut map = LATE_CBV_PAGES.write().unwrap_or_else(|e| e.into_inner());
+    for page in (first..last).step_by(K64) {
+        if map.contains_key(&page) {
+            continue;
+        }
+        if map.len() >= LATE_CBV_MOST || cover(page, K64) != Cover::None || !private_whole(page, K64) {
+            LATE_CBV_STATS[1].fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
+        match place_part(&host.device, page as u64, K64 as u64) {
+            Ok(placed) => {
+                crate::host::name(&placed.buffer, || format!("late constant buffers in place {page:#x}+64K"));
+                map.insert(page, LateCbvPage { buffer: placed.buffer, _heap: placed.heap, gpu: placed.gpu });
+                let n = LATE_CBV_STATS[0].fetch_add(1, Ordering::Relaxed);
+                if n < 16 {
+                    tracing::info!(
+                        page = format_args!("{page:#x}"),
+                        fill = format_args!("{from:#x}+{:#x}", to - from),
+                        "late constant buffers: a 64 KiB page the title writes after sending opened for the card to read in \
+                         place (VICTORY_INPLACE_LATE_CBV)"
+                    );
+                }
+            }
+            Err(e) => {
+                LATE_CBV_STATS[1].fetch_add(1, Ordering::Relaxed);
+                if LATE_CBV_STATS[1].load(Ordering::Relaxed) <= 4 {
+                    tracing::warn!(page = format_args!("{page:#x}"), error = ?e, "late constant buffers: the page could not be opened");
+                }
+            }
+        }
+    }
+}
+
+/// The buffer and host GPU address for a constant buffer view of
+/// `[address, address + size)`, if all of it lies in one opened page.
+/// `None` (over two pages, or not opened): the caller fills it as before,
+/// and that fill waits for a learned page.
+pub(crate) fn late_cbv_part(address: u64, size: u32) -> Option<(ID3D12Resource, u64)> {
+    if size == 0 {
+        return None;
+    }
+    let start = address as usize;
+    let end = start.checked_add(size as usize)?;
+    let page = start & !(K64 - 1);
+    if end > page + K64 {
+        return None;
+    }
+    let map = LATE_CBV_PAGES.read().unwrap_or_else(|e| e.into_inner());
+    let entry = map.get(&page)?;
+    Some((entry.buffer.clone(), entry.gpu + (address - page as u64)))
+}
+
+/// A slot pointed in place, of `size` bytes.
+pub(crate) fn late_cbv_bound(size: u32) {
+    LATE_CBV_STATS[2].fetch_add(1, Ordering::Relaxed);
+    LATE_CBV_STATS[3].fetch_add(u64::from(size), Ordering::Relaxed);
+}
+
+/// Not bound: under flights' declared writes (`skipped`), or bound all the
+/// same (mode 2).
+pub(crate) fn late_cbv_under_flights(skipped: bool) {
+    LATE_CBV_STATS[if skipped { 4 } else { 5 }].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Not bound: the slot could not take the view.
+pub(crate) fn late_cbv_slot_refused() {
+    LATE_CBV_STATS[6].fetch_add(1, Ordering::Relaxed);
+}
+
+/// The title maps other memory at `[at, at + len)`: the pages there go.
+fn forget_late_cbv_pages(at: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let first = at & !(K64 - 1);
+    let end = at.saturating_add(len);
+    let retired: Vec<LateCbvPage> = {
+        let mut map = LATE_CBV_PAGES.write().unwrap_or_else(|e| e.into_inner());
+        if map.is_empty() {
+            return;
+        }
+        let keys: Vec<usize> = map.range(first..end).map(|(&k, _)| k).collect();
+        keys.into_iter().filter_map(|k| map.remove(&k)).collect()
+    };
+    LATE_CBV_STATS[0].fetch_sub(retired.len() as u64, Ordering::Relaxed);
+    for page in retired {
+        crate::host::retire(page);
+    }
+}
+
+/// For the frame-rate line.
+pub(crate) fn late_cbv_log(frames: f64) {
+    if !late_cbv_asked() {
+        return;
+    }
+    let s: Vec<u64> = LATE_CBV_STATS
+        .iter()
+        .enumerate()
+        .map(|(i, c)| if i < 2 { c.load(Ordering::Relaxed) } else { c.swap(0, Ordering::Relaxed) })
+        .collect();
+    let f = frames.max(1.0);
+    tracing::info!(
+        "late constant buffers in place (VICTORY_INPLACE_LATE_CBV={}, now {}): {} pages of 64 KiB open ({} refused \
+         since the start); per frame {:.1} slots pointed in place ({:.1} KB not filled, no wait for them), {:.1} left to \
+         their fill as flights in the air declared shader writes there, {:.1} pointed in place all the same (mode 2), \
+         {:.1} slots that could not take the view",
+        late_cbv_mode(),
+        if late_cbv_on() { "on" } else { "off" },
+        s[0],
+        s[1],
+        s[2] as f64 / f,
+        s[3] as f64 / 1024.0 / f,
+        s[4] as f64 / f,
+        s[5] as f64 / f,
+        s[6] as f64 / f,
+    );
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1500,6 +1714,62 @@ pub(crate) mod tests {
             assert!(gone, "the heap keeps the pages");
             assert!(matches!(place_part(&device, start, len), Err(None)));
             mem::VirtualFree(base.cast(), 0, mem::MEM_RELEASE);
+        }
+    }
+
+    /// Late constant buffers in place (`VICTORY_INPLACE_LATE_CBV`, the fix
+    /// of Claude-31) on the software adapter: two neighbouring 64 KiB pages
+    /// of write-watched private memory opened on their own. A constant
+    /// buffer inside one page is given a place in it, and the GPU reads the
+    /// title's bytes there, also those the CPU wrote after the place was
+    /// given (the late write). One over the boundary of the two pages, or
+    /// on a page not opened, is given none: its fill stays, and waits.
+    #[test]
+    fn warp_late_constant_buffers_one_page_only_and_the_gpu_reads_late_bytes() {
+        let _turn = crate::indirect::tests::warp_turn();
+        let Some(device) = warp() else { return };
+        if device.cast::<ID3D12Device13>().is_err() {
+            return;
+        }
+        // SAFETY: an allocation of the test's own, let go after its pages.
+        unsafe {
+            let base = mem::VirtualAlloc(std::ptr::null(), 4 * K64, mem::MEM_RESERVE | mem::MEM_COMMIT | MEM_WRITE_WATCH, mem::PAGE_READWRITE).cast::<u8>();
+            assert!(!base.is_null());
+            let (one, two) = (base as usize + K64, base as usize + 2 * K64);
+            for page in [one, two] {
+                let placed = place_part(&device, page as u64, K64 as u64).unwrap_or_else(|e| panic!("not placed: {e:?}"));
+                LATE_CBV_PAGES
+                    .write()
+                    .unwrap()
+                    .insert(page, LateCbvPage { buffer: placed.buffer, _heap: placed.heap, gpu: placed.gpu });
+            }
+            // Inside the first page, 240 bytes off its start.
+            let at = one + 0x40f0 - 0x40f0 % 16;
+            fill(at as *mut u8, 240, 3);
+            let (buffer, gpu) = late_cbv_part(at as u64, 240).expect("inside one opened page");
+            let offset = gpu - buffer.GetGPUVirtualAddress();
+            assert_eq!(offset, (at - one) as u64);
+            let mut rig = Rig::new(&device).unwrap();
+            assert!(same(at as *const u8, &rig.fetch(&buffer, offset, 240).unwrap()), "the title's bytes");
+            // The title writes it again after the place was given.
+            std::ptr::write_bytes(at as *mut u8, 0x5a, 240);
+            assert_eq!(rig.fetch(&buffer, offset, 240).unwrap(), vec![0x5a; 240], "the late bytes, read in place");
+            // The last bytes of the second page: still one page.
+            assert!(late_cbv_part((two + K64 - 256) as u64, 256).is_some());
+            // Over the boundary of the two opened pages: none, the fill stays.
+            assert!(late_cbv_part((two - 128) as u64, 256).is_none(), "over two pages");
+            // Over the boundary into a page not opened, and inside one not opened.
+            assert!(late_cbv_part((two + K64 - 128) as u64, 256).is_none());
+            assert!(late_cbv_part(base as u64 + 16, 64).is_none());
+            assert!(late_cbv_part(at as u64, 0).is_none());
+            drop(rig);
+            // The title maps other memory there: both pages go.
+            forget_late_cbv_pages(one, 2 * K64);
+            assert!(late_cbv_part(at as u64, 240).is_none());
+            assert!(LATE_CBV_PAGES.read().unwrap().range(one..two + K64).next().is_none());
+            // (The heaps went to `crate::host::retire`, which keeps them until
+            // the submissions running now are over; without a host here they
+            // stay, and so does this allocation, until the test process ends.)
         }
     }
 

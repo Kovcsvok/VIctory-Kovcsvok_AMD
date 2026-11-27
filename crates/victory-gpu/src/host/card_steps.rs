@@ -624,6 +624,9 @@ pub(super) struct Taken {
     /// The fills of the submission done on the CPU: upload memory, place,
     /// length ([`late`]).
     cpu: Vec<(usize, usize, usize)>,
+    /// Those of them on pages learned ([`late`]), done again right before
+    /// the card runs the submission ([`super::late_fills`]).
+    again: Vec<(usize, usize, usize)>,
 }
 
 /// Places the title writes after the submission that reads them was sent.
@@ -742,6 +745,11 @@ mod late {
     }
 
     fn learn(from: usize, to: usize, by: &str) {
+        // Its 64 KiB pages opened for the card to read in place
+        // (`VICTORY_INPLACE_LATE_CBV`): a draw whose slot is pointed there
+        // has no fill to wait for; one that is not keeps its fill, which
+        // waits for the page learned here as before.
+        crate::inplace::register_late_cbv(from, to);
         let mut pages = PAGES.lock().unwrap_or_else(|e| e.into_inner());
         let pages = pages.get_or_insert_with(Default::default);
         for page in from / PAGE..to.div_ceil(PAGE) {
@@ -765,6 +773,12 @@ const WRITTEN_LATE: &str = "a fill reads a place the title was found writing aft
 impl Taken {
     pub(super) fn list(&self) -> &HostList {
         &self.own.list
+    }
+
+    /// The fills to do again right before the card runs the submission
+    /// ([`super::late_fills`]): upload memory, place, length.
+    pub(super) fn again(&self) -> &[(usize, usize, usize)] {
+        &self.again
     }
 
     /// Whether step `i` of `list` is done by this.
@@ -834,16 +848,46 @@ impl Host {
     fn take_steps(&self, written: &[(usize, usize)], runs: &[&HostList]) -> Result<Option<Taken>, &'static str> {
         let mut spent = crate::timeline::span("steps on the card: chosen");
         let (does, steps) = does_of(written, runs);
-        let chosen = plan(&does, stage(), placed_order(), &mut None)?;
+        let mut chosen = plan(&does, stage(), placed_order(), &mut None)?;
         // Every fill of the submission, taken or not: one done on the CPU is
-        // done now too, not after the wait ([`late`]).
-        if late::on()
-            && does.iter().any(|d| matches!(*d, Does::Fill { src, len, .. } if late::written(src, src + len)))
-        {
-            late::COUNTS[2].fetch_add(1, Ordering::Relaxed);
-            return Err(WRITTEN_LATE);
+        // done now too, not after the wait ([`late`]). With
+        // `VICTORY_LATE_FILLS` such fills are done on the CPU, again right
+        // before the card runs the submission, and the submission does not
+        // wait. One taken to the card because it reads what flights ahead
+        // write is left to the CPU too in mode 1 (they have landed when it is
+        // done again: title memory holds what they wrote); one that reads what
+        // a copy taken to the card writes cannot be (that is not in title
+        // memory before this submission lands), and in mode 2 none: the
+        // submission waits as before.
+        let learned = |d: &Does| matches!(*d, Does::Fill { src, len, .. } if late::written(src, src + len));
+        let mut again_wanted = false;
+        if late::on() && does.iter().any(learned) {
+            let mode = super::late_fills::mode();
+            let copied: Vec<(usize, usize)> = chosen
+                .iter()
+                .filter_map(|&(i, _)| match does[i] {
+                    Does::Copy { dst, len, .. } => Some((dst, dst + len)),
+                    _ => None,
+                })
+                .collect();
+            let movable = |d: &Does| match *d {
+                Does::Fill { src, len, .. } => mode == 1 && !copied.iter().any(|&w| meet((src, src + len), w)),
+                _ => false,
+            };
+            let stuck = chosen.iter().any(|&(i, _)| learned(&does[i]) && !movable(&does[i]));
+            if mode == 0 || stuck {
+                if mode > 0 {
+                    super::late_fills::refused_on_card();
+                }
+                late::COUNTS[2].fetch_add(1, Ordering::Relaxed);
+                return Err(WRITTEN_LATE);
+            }
+            let before = chosen.len();
+            chosen.retain(|&(i, _)| !learned(&does[i]));
+            super::late_fills::moved_to_cpu(before - chosen.len());
+            again_wanted = true;
         }
-        if chosen.is_empty() {
+        if chosen.is_empty() && !again_wanted {
             return Ok(None);
         }
         spent.next("steps on the card: what holds their bytes");
@@ -964,8 +1008,10 @@ impl Host {
         }
         #[cfg(feature = "diagnostics")]
         own.list.note_op(|| format!("{} copies of title memory done on the card, {end} bytes (VICTORY_CARD_STEPS)", ops.len()));
-        let levels = ops.iter().map(|op| op.level).max().unwrap_or(0);
-        for level in 0..=levels {
+        // (No steps at all: only fills done again before the card runs the
+        // submission, [`super::late_fills`]; the list stays empty.)
+        let levels = if ops.is_empty() { None } else { ops.iter().map(|op| op.level).max() };
+        for level in levels.map_or(0..=0, |l| 0..=l).filter(|_| levels.is_some()) {
             let mut reads = Vec::new();
             let mut writes = Vec::new();
             for op in ops.iter().filter(|op| op.level == level) {
@@ -1028,6 +1074,7 @@ impl Host {
         // The fills left to the CPU: done when the submission is prepared,
         // now, into upload memory that holds them until its lists are reset.
         let mut cpu = Vec::new();
+        let mut again = Vec::new();
         if late::on() {
             for list in runs {
                 let at = std::ptr::from_ref::<HostList>(list) as usize;
@@ -1036,6 +1083,9 @@ impl Host {
                         && !steps.contains(&(at, i))
                     {
                         cpu.push((dst, src, len));
+                        if again_wanted && late::written(src, src + len) {
+                            again.push((dst, src, len));
+                        }
                     }
                 }
             }
@@ -1046,6 +1096,7 @@ impl Host {
             copied,
             sent,
             cpu,
+            again,
         }))
     }
 

@@ -43,6 +43,9 @@ pub(crate) struct Pending {
     used: AtomicBool,
     /// A pass over the screen ([`GraphicsState::screen_pass`]).
     screen: bool,
+    /// The title frame in which a first use first waited for it (`u64::MAX`:
+    /// none yet; [`wait_once`]).
+    waited_in: AtomicU64,
 }
 
 // SAFETY: D3D12 objects are free-threaded; the graphics state (whose input
@@ -68,6 +71,7 @@ impl Pending {
             made: OnceLock::new(),
             key: key.finalize().to_hex()[..32].to_owned(),
             used: AtomicBool::new(false),
+            waited_in: AtomicU64::new(u64::MAX),
         }
     }
 
@@ -434,12 +438,39 @@ fn shared_budget() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_PIPELINE_WAIT_SHARED").is_none_or(|v| v != "0"))
 }
 
+/// Whether a pipeline is waited for in one title frame only
+/// (`VICTORY_PIPELINE_WAIT_ONCE=1`, Claude-32): the frames after the one in
+/// which its first use waited drop its draws until it is made, as each of
+/// them did anyway once its budget was spent. A pipeline that takes seconds
+/// to make cost every frame its whole budget: eight frames of 480 ms in a
+/// row (the 17:33 run at 16:41:37 UTC; the timeline of the 17:46 run shows
+/// such frames waiting on a `victory-pipelines` thread). A pass the title
+/// runs once still gets its wait, in its frame.
+fn wait_once() -> bool {
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick("VICTORY_PIPELINE_WAIT_ONCE") {
+        return on;
+    }
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PIPELINE_WAIT_ONCE").is_some_and(|v| v == "1"))
+}
+
+/// First uses not waited for again ([`wait_once`]), since the start.
+pub(crate) static NOT_WAITED_AGAIN: AtomicU64 = AtomicU64::new(0);
+
 /// Waits for `p` while frame `frame` has budget left.
 fn wait(p: &Pending, frame: u64) {
     let screen = p.screen && screens_first();
     let budget = if screen { screen_budget() } else { wait_budget() };
     if budget.is_zero() {
         return;
+    }
+    if wait_once() {
+        let first = p.waited_in.load(Ordering::Relaxed);
+        if first != u64::MAX && first != frame {
+            NOT_WAITED_AGAIN.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
     }
     // The frame the budget belongs to, and what was waited of it (or is
     // taken by a thread waiting now); of the passes over the screen too.
@@ -459,6 +490,10 @@ fn wait(p: &Pending, frame: u64) {
     };
     if left.is_zero() {
         return;
+    }
+    // (Its frame is the first one with budget left for it.)
+    if wait_once() {
+        let _ = p.waited_in.compare_exchange(u64::MAX, frame, Ordering::Relaxed, Ordering::Relaxed);
     }
     let waiting = crate::timeline::span("pipeline: first use waits for a host pipeline");
     let started = Instant::now();

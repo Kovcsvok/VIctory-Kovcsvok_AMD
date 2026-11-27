@@ -53,6 +53,54 @@
 #   -FeltoltoBlokk '2' (alap, 11-27 12:20 óta) = VICTORY_STAGING_SPARES=2: a textúrák 64 MB-os feltöltő
 #             blokkjaiból legfeljebb ennyi üres marad, másodpercenként ellenőrizve (Codex ötlete és kódja,
 #             Claude-29). A 11:31-es menetben ezek a betöltéstől végig 576 MB-ot foglaltak; 'alap' = 8, a régi mód
+#   -AutoA    'be' (alap, 11-27 13:10 óta) = VICTORY_AUTO_A=1: a játék virtuális kontrollere a 25. és a 150.
+#             másodperc között 5 másodpercenként megnyomja az A-t (a fiókválasztó csak kontrollerre lép tovább),
+#             amíg a játék a mentéseit nem listázza (= túl van a fiókválasztón; a 13:09-es próbában 0,5 s-mal az
+#             első nyomás után). Amint a felhasználó bármit megnyom (kontroller vagy billentyű), végleg abbahagyja.
+#             '<tól>,<ig>,<mp>' = tesztmenethez: a menükön át is nyomja (a 13:09-es próbában kb. 70 s-ra betöltött) Bekapcsolva a
+#             mentések mappájáról indulás előtt másolat készül (state\belobug-9070\mentes-masolatok); 'ki' = nincs
+#   -KesoToltes 'ki' (alap) / '1' / '2' = VICTORY_LATE_FILLS: a csónak-javítás megtanult lapjait egy saját szál
+#             tölti újra közvetlenül azelőtt, hogy a kártya a beküldést futtatja, és a beküldő szál nem vár
+#             (Claude-30; a 20 ms-os várakozás ellen). '1' = az előtte lévők beérkezése után (a régi várakozás
+#             pillanata), '2' = már amikor a kártya lefuttatta őket
+#   -KesoCbv  'ki' (alap) / '1' / '2' = VICTORY_INPLACE_LATE_CBV (Claude-31, az Antigravity 141b746 nyomán, a GPT
+#             által talált határhiba javításával): a csónak-javítás megtanult lapjait a kártya közvetlenül a játék
+#             memóriájából olvassa (64 KiB-os lapok), így ott nincs mit várni. Csak egy lapon belüli pufferre;
+#             a többi a régi, várakozó úton marad. '1' = ahol futó beküldés írhat, ott nem; '2' = ott is
+#   -ListaKorai 'be' (alap, 11-27 16:55 óta) / 'ki' = VICTORY_LANDED_EARLY=1 + VICTORY_LIST_IDLE_MOST=256 (Claude-31, RAM): a lefutott
+#             beküldések parancslistái azonnal visszakerülnek a készletbe (nem 64 beküldésnyi várakozás után); amire a
+#             parancsaik hivatkoztak, az ugyanannyi ideig marad meg, mint eddig. A 16:33-as menetben 1959 élő listából
+#             803 volt ilyen visszatartott lista. A 16:47-es próbában 1133 élő lista (1940 helyett), a privát csúcs
+#             25,8 GB (27,4 helyett), a munkakészlet csúcsa 21,6 GB (23,0 helyett), lassulás nélkül; 'ki' = a régi mód
+#   -ListaLusta 'be' (alap, 11-27 17:25 óta) / 'ki' = VICTORY_LIST_LAZY=1 (Claude-32, RAM): a beküldött lista nem
+#             kap azonnal új gépi listát, csak amikor a játék újra írni kezd bele; az üres (csak nyitott és lezárt)
+#             lista a lezárásakor visszaadja; a tartalékkészlet felső határa rugalmas (2 mp-ig használatlan fölösleg
+#             megy el). A 17:14-es próbában 409 élő lista 1133 helyett, munkakészlet medián 17,96 GiB 18,95 helyett,
+#             képidő 42,3 ms 45,1 helyett; 'ki' = a régi mód
+#   -ShaderVaras 'egyszer' (alap, 11-27 18:10 óta) / 'mindig' = VICTORY_PIPELINE_WAIT_ONCE=1 (Claude-32, akadások): egy új
+#             gépi shaderre csak az első használat képkockájában vár (legfeljebb fél mp-et), utána a rajzolása kimarad,
+#             amíg el nem készül. Előtte egy több mp-ig forduló shaderre minden képkocka újra fél mp-et várt: 8 képkocka
+#             480 ms-mal egymás után (17:33-as próba); 'mindig' = a régi mód
+#   -Idovonal '<mp>[+<mp>..],<képkocka>' = VICTORY_TIMELINE a menet mappájába (idovonal*.json és .txt): ennyi
+#             másodperc után ennyi képkocka minden szál munkájáról és várakozásáról (Claude-32)
+#   -IdovonalLassu <ms> = VICTORY_TIMELINE_SLOW: az idővonal az idő eljötte után az első ennyi ms-nál lassabb
+#             képkockánál indul (akadások elkapására)
+#   -Figyelo  HOSSZÚ JÁTÉK-MÉRÉS (Claude-35, a menü 0-s pontja): amíg játszol, egy menetben figyel mindent:
+#             - akadások: 6 képkockás idővonal-felvétel minden 250 ms-nál hosszabb képkockánál;
+#             - alacsony FPS: felvétel, ha az utolsó 30 képkocka átlaga 50 ms fölött van (20 FPS alatt);
+#             - F8: minden lenyomásra felvétel is (nem csak jelölés): nyomd meg, ha akad, lassú vagy durva
+#               modellek jönnek; az automatikus felvételek között legalább 90 mp, az F8-é nem vár;
+#             - legfeljebb 60 felvétel a 180. mp-től; az első 4-nek a nagy (15 MB-os) fájlja is, a többinek
+#               csak a 70 KB-os összefoglalója (idovonal.<mp>-<ok>.txt; ok: hitch, low, mark);
+#             - memória: percenként a naplóba, melyik programrészünk foglalja a még növő memóriát
+#               (VICTORY_HEAP_SITES=1, minden ezredik foglalás helye);
+#             - adatbetöltés: a játék adatkérései (betoltes.tsv, mint a -BetoltesNaplo; 40 perc kb. 280 MB).
+#             Nincs időkorlát: addig mér, amíg játszol.
+#   -BetoltesNaplo = VICTORY_DSTORAGE_LOG a menet mappájába (betoltes.tsv): a játék minden adatkérése a
+#             beküldés, indulás és kész idejével, és másodpercenként a lapbekötések ára (10 perc kb. 70 MB)
+#   -Perc     felügyelet nélküli menet: ennyi perc után az ablakot bezárja (mint az X gomb); kevés memória
+#             esetén ilyenkor nem kérdez, hanem leáll
+#   -Felvetel VICTORY_RECORD_AT='<tól>,<ig>' másodpercben: magától induló videó (felügyelet nélküli menethez)
 #   Videó: a játékban F9 indítja és ugyanaz állítja le a felvételt (HUD: piros REC); a fájl
 #             a menet mappájába kerül, felvetel-<UTC idő>.mp4 néven.
 #   -DryRun   csak előkészít, nem indít játékot
@@ -77,6 +125,18 @@ param(
     [ValidateSet('be', 'ki')][string]$KartyaLepes = 'be',
     [ValidateSet('be', 'ki')][string]$ListaKeszlet = 'be',
     [ValidateSet('alap', '0', '1', '2', '4')][string]$FeltoltoBlokk = '2',
+    [ValidatePattern('^(be|ki|[0-9]+,[0-9]+,[0-9]+)$')][string]$AutoA = 'be',
+    [ValidateSet('ki', '1', '2')][string]$KesoToltes = 'ki',
+    [ValidateSet('ki', '1', '2')][string]$KesoCbv = 'ki',
+    [ValidateSet('ki', 'be')][string]$ListaKorai = 'be',
+    [ValidateSet('ki', 'be')][string]$ListaLusta = 'be',
+    [ValidateSet('egyszer', 'mindig')][string]$ShaderVaras = 'egyszer',
+    [ValidatePattern('^$|^\d+(\+\d+)*,\d+$')][string]$Idovonal = '',
+    [ValidateRange(0, 5000)][int]$IdovonalLassu = 0,
+    [switch]$BetoltesNaplo,
+    [switch]$Figyelo,
+    [ValidateRange(0, 120)][int]$Perc = 0,
+    [ValidatePattern('^$|^\d+,\d+$')][string]$Felvetel = '',
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -147,6 +207,13 @@ if ($RtFeloldas -eq 'ki') {
     $settings.VICTORY_SKIP_PIPELINES = ((Get-Content -LiteralPath $rtList) | Where-Object { $_ -match '^[0-9a-f]{16}$' }) -join ','
 }
 if ($Tukrozes -eq 'be') { $settings.VICTORY_REFLECT_HOLD = '1' }
+if ($AutoA -eq 'be') { $settings.VICTORY_AUTO_A = '1' } elseif ($AutoA -ne 'ki') { $settings.VICTORY_AUTO_A = $AutoA }   # A gomb magától a fiókválasztónál (Claude-30)
+if ($KesoToltes -ne 'ki') { $settings.VICTORY_LATE_FILLS = $KesoToltes }   # a 20 ms-os várakozás ellen (Claude-30)
+if ($KesoCbv -ne 'ki') { $settings.VICTORY_INPLACE_LATE_CBV = $KesoCbv }   # közvetlen olvasás (Claude-31)
+if ($ListaKorai -eq 'be') { $settings.VICTORY_LANDED_EARLY = '1'; $settings.VICTORY_LIST_IDLE_MOST = '256' }   # RAM (Claude-31)
+if ($ListaLusta -eq 'be') { $settings.VICTORY_LIST_LAZY = '1' }   # RAM (Claude-32)
+if ($ShaderVaras -eq 'egyszer') { $settings.VICTORY_PIPELINE_WAIT_ONCE = '1' }   # akadások (Claude-32)
+if ($Felvetel) { $settings.VICTORY_RECORD_AT = $Felvetel }
 if ($AB) { $settings.VICTORY_AB = $AB }
 if ($NoPcFsr) { $settings.VICTORY_FSR_PC = '0' }
 else {
@@ -166,6 +233,7 @@ foreach ($h in $heavy) { $pre += [string]::Format($inv, 'Nagy memóriahasználó
 $pre | ForEach-Object { Write-Host $_ }
 if (($heavy.Count -gt 0 -or $free -lt 20) -and -not $DryRun) {
     Write-Host 'FIGYELEM: kevés a szabad memória, vagy nagy program fut. Zárd be (pl. llama-server).' -ForegroundColor Yellow
+    if ($Perc -gt 0) { Write-Host 'Felügyelet nélküli menet: leállítva.'; exit 2 }
     $answer = Read-Host 'Folytatod mégis? (i/n)'
     if ($answer -notmatch '^[iIyY]') { Write-Host 'Leállítva.'; exit 2 }
 }
@@ -183,7 +251,7 @@ $hash = (Get-FileHash -LiteralPath $victory -Algorithm SHA256).Hash
     "Indítva (UTC): $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))",
     "Kódfa: $tree, ág $branch, HEAD $head",
     "victory.exe: $victory, SHA-256 $hash",
-    "Profil: Belobug rx9070xt csomag, Series S, $(if ($Safe) { '-Safe, renderer-portok nélkül' } else { 'renderer-portok ' + ((@(@('1', $Port1), @('2', $Port2), @('5', 'be'), @('6', 'be'), @('7', 'be')) | Where-Object { $_[1] -eq 'be' } | ForEach-Object { $_[0] }) -join ', ') + $(if ($Port1 -eq 'ki' -or $Port2 -eq 'ki') { ' (' + ((@(@('1', $Port1), @('2', $Port2)) | Where-Object { $_[1] -eq 'ki' } | ForEach-Object { $_[0] + '-es' }) -join ' és ') + ' nélkül)' } else { '' }) }), textúrakorlát $(if ($TexMax -ne 'alap') { "$TexMax px" } else { 'a csomag alapértéke' }), $(if ($NoPcFsr) { 'a játék saját FSR-je' } else { 'PC-s AMD FSR' }), textúra-újranézés $(if ($LookMs -ne 'alap') { "legalább $LookMs ms-onként" } else { 'a csomag alapja' }), KEEP_SHOWN $(if ($KeepShown -ne 'alap') { $KeepShown } else { 'a csomag alapja (1)' })$(if ($Kepsor) { ', képsor 3 kép/s' }), FPS-korlát $(switch ($MaxFps) { '60' { '60' } 'nincs' { 'nincs' } default { 'a játéké (30)' } }), FSR-élesítés $(if ($Sharp -ne 'alap') { $Sharp } else { 'a játéké' }), fa-javítás (fix/popin 7ab13ed) $(if ($Safe -or $Port1 -eq 'ki') { 'hatástalan (1-es port nélkül)' } elseif ($FaJavitas -eq 'ki') { 'kikapcsolva' } else { 'bekapcsolva' }), fa-eltűnés elleni VICTORY_TWIN_MOVE bekapcsolva (saját, az avatarmanz PR 437 nyomán; a PR saját TWIN_EXACT-je ezen a kártyán összeomlik), előtét-listák közös készletben (VICTORY_PRELUDE_POOL) $(if ($ListaKeszlet -eq 'be') { 'bekapcsolva' } else { 'kikapcsolva' }), üres feltöltő blokkok legfeljebb $(if ($FeltoltoBlokk -eq 'alap') { '8 (régi mód)' } else { "$FeltoltoBlokk (VICTORY_STAGING_SPARES)" }), csónak-lépések a kártyán (VICTORY_CARD_STEPS)$(if ($KartyaLepes -eq 'ki') { 'kikapcsolva (pontos, lassabb ellenőrzés)' } else { '2' }), csónak-javítás (CARD_STEPS_LEARN, avatarmanz PR 434) $(if ($Learn -eq 'be') { 'bekapcsolva (képhű, lassabb)' } else { 'kikapcsolva (gyors; nyúló alakok és eltűnő szakáll)' }), karakteres RT-feloldás (42 CS_RaytracingResolve) $(if ($RtFeloldas -eq 'be') { 'fut' } else { 'kihagyva' }), szemüveg-korlát (VICTORY_REFLECT_HOLD) $(if ($AB -match 'VICTORY_REFLECT_HOLD') { 'élő próbában váltva' } elseif ($Tukrozes -eq 'be') { 'bekapcsolva' } else { 'kikapcsolva' })$(if ($AB) { ", élő kapcsolók (VICTORY_AB): $AB" })",
+    "Profil: Belobug rx9070xt csomag, Series S, $(if ($Safe) { '-Safe, renderer-portok nélkül' } else { 'renderer-portok ' + ((@(@('1', $Port1), @('2', $Port2), @('5', 'be'), @('6', 'be'), @('7', 'be')) | Where-Object { $_[1] -eq 'be' } | ForEach-Object { $_[0] }) -join ', ') + $(if ($Port1 -eq 'ki' -or $Port2 -eq 'ki') { ' (' + ((@(@('1', $Port1), @('2', $Port2)) | Where-Object { $_[1] -eq 'ki' } | ForEach-Object { $_[0] + '-es' }) -join ' és ') + ' nélkül)' } else { '' }) }), textúrakorlát $(if ($TexMax -ne 'alap') { "$TexMax px" } else { 'a csomag alapértéke' }), $(if ($NoPcFsr) { 'a játék saját FSR-je' } else { 'PC-s AMD FSR' }), textúra-újranézés $(if ($LookMs -ne 'alap') { "legalább $LookMs ms-onként" } else { 'a csomag alapja' }), KEEP_SHOWN $(if ($KeepShown -ne 'alap') { $KeepShown } else { 'a csomag alapja (1)' })$(if ($Kepsor) { ', képsor 3 kép/s' }), FPS-korlát $(switch ($MaxFps) { '60' { '60' } 'nincs' { 'nincs' } default { 'a játéké (30)' } }), FSR-élesítés $(if ($Sharp -ne 'alap') { $Sharp } else { 'a játéké' }), fa-javítás (fix/popin 7ab13ed) $(if ($Safe -or $Port1 -eq 'ki') { 'hatástalan (1-es port nélkül)' } elseif ($FaJavitas -eq 'ki') { 'kikapcsolva' } else { 'bekapcsolva' }), fa-eltűnés elleni VICTORY_TWIN_MOVE bekapcsolva (saját, az avatarmanz PR 437 nyomán; a PR saját TWIN_EXACT-je ezen a kártyán összeomlik), előtét-listák közös készletben (VICTORY_PRELUDE_POOL) $(if ($ListaKeszlet -eq 'be') { 'bekapcsolva' } else { 'kikapcsolva' }), üres feltöltő blokkok legfeljebb $(if ($FeltoltoBlokk -eq 'alap') { '8 (régi mód)' } else { "$FeltoltoBlokk (VICTORY_STAGING_SPARES)" }), csónak-lépések a kártyán (VICTORY_CARD_STEPS)$(if ($KartyaLepes -eq 'ki') { 'kikapcsolva (pontos, lassabb ellenőrzés)' } else { '2' }), csónak-javítás (CARD_STEPS_LEARN, avatarmanz PR 434) $(if ($Learn -eq 'be') { 'bekapcsolva (képhű, lassabb)' } else { 'kikapcsolva (gyors; nyúló alakok és eltűnő szakáll)' }), karakteres RT-feloldás (42 CS_RaytracingResolve) $(if ($RtFeloldas -eq 'be') { 'fut' } else { 'kihagyva' }), szemüveg-korlát (VICTORY_REFLECT_HOLD) $(if ($AB -match 'VICTORY_REFLECT_HOLD') { 'élő próbában váltva' } elseif ($Tukrozes -eq 'be') { 'bekapcsolva' } else { 'kikapcsolva' })$(if ($AutoA -eq 'be') { ', A gomb magától (VICTORY_AUTO_A) a fiókválasztóig' } elseif ($AutoA -ne 'ki') { ", A gomb magától (VICTORY_AUTO_A=$AutoA, a menükön át)" })$(if ($KesoToltes -ne 'ki') { ", késő töltések a kártya előtt (VICTORY_LATE_FILLS=$KesoToltes)" })$(if ($ListaKorai -eq 'be') { ', lefutott listák azonnal vissza (VICTORY_LANDED_EARLY, legfeljebb 256 tartalék)' })$(if ($ListaLusta -eq 'be') { ', beküldött lista új gépi listát csak újraíráskor kap (VICTORY_LIST_LAZY)' })$(if ($ShaderVaras -eq 'egyszer') { ', új shaderre csak egy képkockában vár (VICTORY_PIPELINE_WAIT_ONCE)' })$(if ($KesoCbv -ne 'ki') { ", késői konstanspufferek helyben (VICTORY_INPLACE_LATE_CBV=$KesoCbv)" })$(if ($Perc -gt 0) { ", felügyelet nélkül, $Perc perc után bezárva" })$(if ($AB) { ", élő kapcsolók (VICTORY_AB): $AB" })$(if ($Figyelo) { ', HOSSZÚ JÁTÉK-MÉRÉS: idővonal akadásnál (250 ms), 20 FPS alatti jelenetnél és F8-ra, memória-helyek, adatbetöltési napló' })",
     "Beállítások: $(($settings.Keys | ForEach-Object { "$_=$($settings[$_])" }) -join ' ')",
     'Indítás előtti állapot:'
 ) + ($pre | ForEach-Object { "  $_" }) | Set-Content -LiteralPath $info -Encoding UTF8
@@ -201,7 +269,7 @@ $sampler =Start-Process -FilePath powershell.exe -WindowStyle Hidden -PassThru -
     '-Out', "`"$memo`"", '-StopFile', "`"$stop`"")
 $marker = Start-Process -FilePath powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
     '-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', "`"$PSScriptRoot\jelolo.ps1`"",
-    '-Out', "`"$marks`"", '-StopFile', "`"$stop`"")
+    '-Out', "`"$marks`"", '-StopFile', "`"$stop`"", '-MaxSeconds', $(if ($Figyelo) { '14400' } else { '3600' }))
 $capture = if ($Kepsor) {
     Start-Process -FilePath powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
         '-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', "`"$PSScriptRoot\kepsor.ps1`"",
@@ -210,9 +278,37 @@ $capture = if ($Kepsor) {
 } else { $null }
 
 # --- A játék ---------------------------------------------------------------------------------------
+# A mentések másolata, mielőtt a virtuális kontroller magától nyom (2-3 MB; Claude-30).
+if ($AutoA -ne 'ki') {
+    $saves = Join-Path $dev 'state\belobug-9070\data\7952987A\saves'
+    if (Test-Path -LiteralPath $saves) {
+        $copy = Join-Path $dev "state\belobug-9070\mentes-masolatok\$(Split-Path $dir -Leaf)"
+        New-Item -ItemType Directory -Force -Path $copy | Out-Null
+        Copy-Item -LiteralPath $saves -Destination $copy -Recurse -Force
+    }
+}
+# Felügyelet nélküli menet: az időzítő -Perc perc után bezárja az ablakot (mint az X gomb).
+$closer = if ($Perc -gt 0) {
+    Start-Process -FilePath powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', "`"$PSScriptRoot\idozito-zaro.ps1`"",
+        '-Perc', "$Perc", '-StopFile', "`"$stop`"")
+} else { $null }
 Get-ChildItem Env:VICTORY_* -ErrorAction SilentlyContinue | Remove-Item
 # F9 a játékban: videófelvétel indul/áll le (a csomag record.rs-e); a fájl a menet mappájába kerül.
 $settings.VICTORY_RECORD_DIR = $dir
+if ($Idovonal) { $settings.VICTORY_TIMELINE = "$Idovonal,$(Join-Path $dir 'idovonal.json')" }   # Claude-32
+if ($IdovonalLassu -gt 0) { $settings.VICTORY_TIMELINE_SLOW = "$IdovonalLassu" }
+if ($BetoltesNaplo) { $settings.VICTORY_DSTORAGE_LOG = (Join-Path $dir 'betoltes.tsv') }   # Claude-32
+if ($Figyelo) {   # Claude-35: a hosszú játék-mérés
+    $settings.VICTORY_TIMELINE = "180x60,6,$(Join-Path $dir 'idovonal.json')"
+    $settings.VICTORY_TIMELINE_SLOW = '250'
+    $settings.VICTORY_TIMELINE_LOW = '50'
+    $settings.VICTORY_TIMELINE_MARKS = $marks
+    $settings.VICTORY_TIMELINE_GAP = '90'
+    $settings.VICTORY_TIMELINE_JSON_MOST = '4'
+    $settings.VICTORY_HEAP_SITES = '1'
+    $settings.VICTORY_DSTORAGE_LOG = (Join-Path $dir 'betoltes.tsv')
+}
 foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
 $env:RUST_LOG = 'info'; $env:NO_COLOR = '1'
 Write-Host ''
@@ -232,6 +328,7 @@ New-Item -ItemType File -Path $stop -Force | Out-Null
 if (-not $sampler.WaitForExit(20000)) { Stop-Process -Id $sampler.Id -Force -ErrorAction SilentlyContinue }
 if (-not $marker.WaitForExit(5000)) { Stop-Process -Id $marker.Id -Force -ErrorAction SilentlyContinue }
 if ($capture -and -not $capture.WaitForExit(10000)) { Stop-Process -Id $capture.Id -Force -ErrorAction SilentlyContinue }
+if ($closer -and -not $closer.WaitForExit(5000)) { Stop-Process -Id $closer.Id -Force -ErrorAction SilentlyContinue }
 Remove-Item -LiteralPath $stop -ErrorAction SilentlyContinue
 if ((Test-Path -LiteralPath $crashes) -and (Get-Item -LiteralPath $crashes).LastWriteTime -ge $started) {
     $all = [IO.File]::ReadAllBytes($crashes)

@@ -171,6 +171,9 @@ static BACKS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 /// recordings let go of in the middle.
 static CHUNKS: AtomicU64 = AtomicU64::new(0);
 static STATS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+/// Since the last line: recordings of nothing whose host list went back to
+/// the pool at their close (`VICTORY_LIST_LAZY`).
+static EMPTIES: AtomicU64 = AtomicU64::new(0);
 
 fn held<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -198,6 +201,8 @@ struct Inner {
     waiting_for_back: bool,
     /// The list of ours (0: none yet).
     back: usize,
+    /// Calls translated so far (its reset and its close among them).
+    calls: u64,
     /// That list was closed by the stream.
     closed: bool,
 }
@@ -251,6 +256,18 @@ impl Recording {
             let (calls, closed) = translate(back, &chunk, || self.abandoned.load(Acquire));
             STATS[0].fetch_add(calls, Relaxed);
             STATS[1].fetch_add(began.elapsed().as_micros() as u64, Relaxed);
+            // A recording of nothing (its reset and its close): its host list
+            // goes back to the pool before anyone may submit it
+            // (`VICTORY_LIST_LAZY`, Claude-32). The title made ~630 lists at
+            // start-up that held one each until they were recorded again.
+            let empty = {
+                let mut inner = held(&self.inner);
+                inner.calls += calls;
+                closed && inner.calls <= 2
+            };
+            if empty && super::lazy() && super::lend_empty(back) {
+                EMPTIES.fetch_add(1, Relaxed);
+            }
             let mut inner = held(&self.inner);
             inner.kept.push(chunk);
             if closed {
@@ -290,6 +307,15 @@ fn give_back(streams: Vec<Vec<u64>>) {
             words.push(s);
         }
     }
+}
+
+/// Lists of ours nobody uses now ([`BACKS`]), and how many of them keep a
+/// host list (for the memory line, Claude-31; with `VICTORY_LIST_LAZY` one
+/// whose recording was submitted has none, Claude-32).
+pub(crate) fn idle_backs() -> (usize, usize) {
+    let backs = held(&BACKS);
+    let holding = backs.iter().filter(|&&b| super::host_list(b as This).is_some()).count();
+    (backs.len(), holding)
 }
 
 /// A list of ours, closed.
@@ -355,12 +381,13 @@ pub(crate) fn line(frames: f64) {
     }
     let s: Vec<f64> = STATS.iter().map(|s| s.swap(0, Relaxed) as f64 / frames).collect();
     tracing::info!(
-        "list calls translated by threads of ours per frame (VICTORY_THIN): {:.0} in {:.1} ms (all threads), {:.1} lists, {:.1} pieces; left in the middle {:.2}",
+        "list calls translated by threads of ours per frame (VICTORY_THIN): {:.0} in {:.1} ms (all threads), {:.1} lists, {:.1} pieces; left in the middle {:.2}; recordings of nothing whose host list went back {:.2}",
         s[0],
         s[1] / 1000.0,
         s[2],
         CHUNKS.swap(0, Relaxed) as f64 / frames,
-        s[3]
+        s[3],
+        EMPTIES.swap(0, Relaxed) as f64 / frames,
     );
 }
 

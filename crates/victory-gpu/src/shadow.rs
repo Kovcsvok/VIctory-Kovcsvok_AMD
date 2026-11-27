@@ -1489,7 +1489,8 @@ struct Workers {
 
 /// Waits awake until `there` says so, `VICTORY_WIDE_SPIN` microseconds at
 /// most (0, the default: not at all): asleep, a thread is woken in 50 us and
-/// more, 95 times a frame.
+/// more, 95 times a frame. (A live A/B of 300 us on 2026-11-27, Claude-39:
+/// no change, -0.05 ms a frame.)
 fn spin(there: impl Fn() -> bool) {
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let most = *MOST.get_or_init(|| std::env::var("VICTORY_WIDE_SPIN").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0));

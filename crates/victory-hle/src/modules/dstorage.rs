@@ -816,7 +816,10 @@ impl Lanes {
         if elapsed.as_secs() >= 5 {
             let waiting: usize = self.lanes.values().map(|l| l.reads.len()).sum();
             let reading = READING.swap(0, Ordering::Relaxed) as f64 / 1e9;
-            tracing::debug!(
+            // (At info since Claude-32: how fast the world streams in, next
+            // to the late high-detail models.)
+            tracing::info!(
+                staging_mb = staging_limit(self.staging) >> 20,
                 requests = *requests,
                 mb_per_s = format_args!("{:.1}", *bytes as f64 / elapsed.as_secs_f64() / 1e6),
                 busy_workers = format_args!("{:.2}", busy.as_secs_f64() / elapsed.as_secs_f64()),
@@ -847,7 +850,7 @@ impl Lanes {
         let lane = self.lanes.get_mut(&id)?;
         let &(seq, Read { request, note }) = lane.reads.front()?;
         let staging = staging_bytes(&request);
-        if self.staged > 0 && self.staged + staging > self.staging {
+        if self.staged > 0 && self.staged + staging > staging_limit(self.staging) {
             self.starved = true;
             self.refused += 1;
             return None;
@@ -972,6 +975,25 @@ fn staging_bytes(request: &Request) -> u64 {
         u64::from(request.source_size)
     } else {
         0
+    }
+}
+
+/// The most compressed source bytes in flight: the staging buffer the title
+/// asked for (32 MiB, or `VICTORY_DSTORAGE_STAGING_MB`'s floor), or with
+/// `VICTORY_DSTORAGE_STAGING_WIDE` on, at least 256 MiB, as codec-d/cool_fox
+/// 641835a4 makes it so that multi-MB chunks do not hold the other workers
+/// back (Claude-32: the late high-detail models; changes live with
+/// `VICTORY_AB`, for one run's comparison).
+fn staging_limit(asked: u64) -> u64 {
+    #[cfg(all(windows, feature = "diagnostics"))]
+    if let Some(on) = victory_gpu::switched("VICTORY_DSTORAGE_STAGING_WIDE") {
+        return if on { asked.max(256 << 20) } else { asked };
+    }
+    static WIDE: OnceLock<bool> = OnceLock::new();
+    if *WIDE.get_or_init(|| std::env::var_os("VICTORY_DSTORAGE_STAGING_WIDE").is_some_and(|v| v == "1")) {
+        asked.max(256 << 20)
+    } else {
+        asked
     }
 }
 

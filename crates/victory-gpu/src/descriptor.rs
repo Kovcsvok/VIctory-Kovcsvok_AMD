@@ -556,7 +556,7 @@ pub(crate) fn sync_heaps() {
                         // slot from this anyway, they wait for a draw
                         // or a pass: noted some frames on, unless a
                         // draw's table turns out to hold them.
-                        if matches!(word(2) >> KIND_SHIFT, CONSTANT | PLACED) && host.copied_waits() {
+                        if matches!(word(2) >> KIND_SHIFT, CONSTANT | PLACED | PLACED_BUFFER) && host.copied_waits() {
                             out.wait.push(index);
                             continue;
                         }
@@ -1098,6 +1098,15 @@ impl View {
 /// without the address: as many as the title has kinds of textures and
 /// buffers, however often it moves them).
 /// `VICTORY_VIEW_INLINE=0`: every view is an entry, as before.
+///
+/// The shapes were not bounded: a shape of a buffer view holds its count of
+/// elements and its resource's width, and the title writes buffer views of
+/// ever other sizes (2,861,374 shapes after ten minutes, 0.9 GB, 99.6 % of
+/// them buffers whose width and count differ; run alak-cenzus, 2026-11-27).
+/// So buffer views that start at their first element and whose width
+/// follows from their count are named whole as well ([`PLACED_BUFFER`]):
+/// address, count and the number of a buffer shape, their description
+/// without those (some hundred).
 struct Views {
     /// Each entry's view and generation.
     list: Vec<(View, u32)>,
@@ -1108,6 +1117,15 @@ struct Views {
     /// The shapes of views of placed memory, and where each is.
     shapes: Vec<Shape>,
     shape_index: std::collections::BTreeMap<Shape, u32>,
+    /// The shapes of buffer views of placed memory whose records name them
+    /// whole ([`PLACED_BUFFER`]), and where each is.
+    buffer_shapes: Vec<Shape>,
+    buffer_shape_index: std::collections::BTreeMap<Shape, u32>,
+    /// When each entry was last made or read, in seconds since the start
+    /// (kept for the views [`Views::reusable`] may give to another).
+    used: Vec<std::sync::atomic::AtomicU32>,
+    /// Where [`Views::reusable`] looks next.
+    cursor: usize,
 }
 
 /// Read far more often than written: every slot a draw reads through a
@@ -1121,6 +1139,10 @@ static VIEWS: std::sync::RwLock<Views> = std::sync::RwLock::new(Views {
     free: Vec::new(),
     shapes: Vec::new(),
     shape_index: std::collections::BTreeMap::new(),
+    buffer_shapes: Vec::new(),
+    buffer_shape_index: std::collections::BTreeMap::new(),
+    used: Vec::new(),
+    cursor: 0,
 });
 pub(crate) const VIEW_TAG: u32 = u32::from_le_bytes(*b"vVIE");
 
@@ -1141,6 +1163,64 @@ const CONSTANT_ADDRESS_BITS: u32 = 47;
 /// memory, which lies below 1 TiB. The 22 bits above them number its shape.
 const PLACED_ADDRESS_BITS: u32 = 40;
 const SHAPES: usize = 1 << (62 - PLACED_ADDRESS_BITS);
+/// A buffer view of placed memory, whole: in its 62 bits from the bottom
+/// the number of its buffer shape ([`BUFFER_SHAPE_BITS`]), its count of
+/// elements, its address in units of its alignment, and at the top which
+/// of [`BUFFER_LAYOUTS`] that is.
+const PLACED_BUFFER: u32 = 3;
+const BUFFER_SHAPE_BITS: u32 = 8;
+const BUFFER_SHAPES: usize = 1 << BUFFER_SHAPE_BITS;
+/// The two layouts of a [`PLACED_BUFFER`] record: bits of the count, and
+/// the alignment of the address (as a shift). An address aligned to 16
+/// bytes leaves 17 bits for the count, one aligned to 4 bytes 15; the
+/// address has the bits of title memory ([`PLACED_ADDRESS_BITS`]) less the
+/// shift, and one bit says the layout: 8 + 17 + 36 + 1 = 8 + 15 + 38 + 1 = 62.
+const BUFFER_LAYOUTS: [(u32, u32); 2] = [(17, 4), (15, 2)];
+
+/// The shapes kept at most: past them a placed view is a table entry. Their
+/// records could number 1 << 22, which took 1.4 GB (run csomag-alap,
+/// 2026-11-27) before buffer views were named whole; textures have some
+/// thousand shapes.
+const SHAPES_MOST: usize = 1 << 17;
+const _: () = assert!(SHAPES_MOST <= SHAPES);
+
+/// Table entries past which [`Views::reusable`] gives the entry of an idle
+/// view without a resource to a new one (`VICTORY_VIEW_ENTRIES_MOST`, at
+/// least 1,024; 262,144 by default). Without it the views that spilt over
+/// from full shapes were kept for the run: 20 million entries, 9.5 GB,
+/// after 41 minutes (run csomag-alap).
+fn entries_most() -> usize {
+    static MOST: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MOST.get_or_init(|| {
+        std::env::var("VICTORY_VIEW_ENTRIES_MOST")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map_or(1 << 18, |n| n.max(1 << 10))
+    })
+}
+
+/// How long a view in a table entry goes unread before its entry may hold
+/// another ([`Views::reusable`]), in seconds: one a frame's draws read is
+/// never given away.
+const IDLE_S: u32 = 30;
+
+/// Entries given to another view since the start ([`Views::reusable`]).
+static REUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Seconds since the start, for [`Views::used`].
+fn seconds() -> u32 {
+    #[cfg(windows)]
+    return (crate::host::coarse_ms() / 1000) as u32;
+    #[cfg(not(windows))]
+    0
+}
+
+/// Whether `view` is of the kinds a record names whole when it can
+/// (constant buffer views, views of placed memory): as a table entry it is
+/// one that did not fit, which no resource frees.
+fn loose(view: &View) -> bool {
+    matches!(view, View::Constant(..) | View::Placed(..))
+}
 
 /// A view of placed memory without its address: whether it is unordered
 /// access, the resource description, and the view's words but the two that
@@ -1155,9 +1235,120 @@ fn inline() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_VIEW_INLINE").is_none_or(|v| v != "0"))
 }
 
+/// Whether buffer views of placed memory are named whole where they can be
+/// ([`PLACED_BUFFER`]). On by default; `VICTORY_VIEW_BUFFERS=0` gives each
+/// a shape of its own, as before. It changes live with `VICTORY_AB`: the
+/// records of both ways read back whichever is on.
+fn buffers_whole() -> bool {
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick("VICTORY_VIEW_BUFFERS") {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_VIEW_BUFFERS").is_none_or(|v| v != "0"))
+}
+
 /// Views named whole in their records since the start: constant buffer
-/// views, views of placed memory (for the memory line).
-static NAMED_WHOLE: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+/// views, views of placed memory, of them buffer views with their count
+/// (for the memory line).
+static NAMED_WHOLE: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// Buffer views of placed memory that got a shape of their own since the
+/// start, by why: they do not start at their first element, their width
+/// does not follow from their count (or their element size is unknown),
+/// their address or count does not fit a record, the buffer shapes are full.
+static BUFFERS_SHAPED: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+/// The size of an element of a buffer view's description `desc` (the
+/// title's 16 words): its structure stride, 4 for a raw view, else its
+/// format's.
+fn buffer_element(unordered: bool, desc: &[u32; 16]) -> Option<u64> {
+    let stride = desc[if unordered { 5 } else { 7 }];
+    if stride > 0 {
+        Some(u64::from(stride))
+    } else if desc[8] & 1 != 0 {
+        // D3D12_BUFFER_SRV_FLAG_RAW, D3D12_BUFFER_UAV_FLAG_RAW.
+        Some(4)
+    } else {
+        crate::resource::element(desc[0]).map(|(bytes, _)| bytes)
+    }
+}
+
+/// Where a buffer view's description has its count of elements (word 6 of
+/// a shader view's, 4 of an unordered access view's).
+fn count_word(unordered: bool) -> usize {
+    if unordered { 4 } else { 6 }
+}
+
+/// A buffer view of placed memory as its buffer shape, address and count
+/// of elements, if a [`PLACED_BUFFER`] record can name it: it starts at its
+/// first element and its resource's width follows from its count (count
+/// times the element, or that rounded up to 16 bytes). The buffer shape is
+/// its description without the count, the width (resource word 4 says
+/// which rule it follows, 0 or 1), the address, and the words the title
+/// leaves its stack in ([`blank_buffer`]). `None` for a view that is no
+/// buffer view; the `Err` is the reason for [`BUFFERS_SHAPED`].
+fn buffer_parts(unordered: bool, resource: &[u32; 14], desc: &[u32; 16]) -> Option<Result<(Shape, u64, u32), usize>> {
+    const BUFFER: u32 = 1;
+    if resource[0] != BUFFER || desc[1] != BUFFER {
+        return None;
+    }
+    let first = if unordered { [2, 3] } else { [4, 5] };
+    if desc[first[0]] != 0 || desc[first[1]] != 0 {
+        return Some(Err(0));
+    }
+    let count = desc[count_word(unordered)];
+    let Some(element) = buffer_element(unordered, desc) else {
+        return Some(Err(1));
+    };
+    let bytes = u64::from(count) * element;
+    let width = u64::from(resource[4]) | u64::from(resource[5]) << 32;
+    let rule = if width == bytes {
+        0
+    } else if width == bytes.next_multiple_of(16) {
+        1
+    } else {
+        return Some(Err(1));
+    };
+    let (resource, desc) = blank_buffer(unordered, resource, desc);
+    let (mut shape, address) = shape_of(unordered, &resource, &desc);
+    (shape.1[4], shape.1[5]) = (rule, 0);
+    shape.2[count_word(unordered)] = 0;
+    Some(Ok((shape, address, count)))
+}
+
+/// A buffer view's resource and view descriptions without the words the
+/// title leaves its stack in, which are no part of the view: resource
+/// words 1 and 13 (the filler of the resource layout, as
+/// `resource::texture_at` knows) and the view's padding (word 3 of a
+/// shader view's, word 9 of both; the run's shapes differed in them).
+fn blank_buffer(unordered: bool, resource: &[u32; 14], desc: &[u32; 16]) -> ([u32; 14], [u32; 16]) {
+    let (mut resource, mut desc) = (*resource, *desc);
+    (resource[1], resource[13]) = (0, 0);
+    if !unordered {
+        desc[3] = 0;
+    }
+    desc[9] = 0;
+    (resource, desc)
+}
+
+/// The record words that name the buffer view of buffer shape `shape`,
+/// `count` elements, at `address`; `None` if they cannot: an address past
+/// title memory, or one whose alignment leaves too few bits for the count.
+fn placed_buffer_words(shape: u32, address: u64, count: u32) -> Option<[u32; 2]> {
+    if address >> PLACED_ADDRESS_BITS != 0 || shape as usize >= BUFFER_SHAPES {
+        return None;
+    }
+    BUFFER_LAYOUTS.into_iter().enumerate().find_map(|(layout, (count_bits, shift))| {
+        (address & ((1 << shift) - 1) == 0 && count >> count_bits == 0).then(|| {
+            let payload = (layout as u64) << 61
+                | (address >> shift) << (BUFFER_SHAPE_BITS + count_bits)
+                | u64::from(count) << BUFFER_SHAPE_BITS
+                | u64::from(shape);
+            kind_words(PLACED_BUFFER, payload)
+        })
+    })
+}
 
 /// The two record words of the 62 bits `payload` of kind `kind`.
 fn kind_words(kind: u32, payload: u64) -> [u32; 2] {
@@ -1220,10 +1411,12 @@ impl Views {
         if let Some(&at) = self.shape_index.get(&shape) {
             return Some(at);
         }
-        if self.shapes.len() >= SHAPES {
+        if self.shapes.len() >= SHAPES_MOST {
             return None;
         }
         let at = self.shapes.len() as u32;
+        #[cfg(all(windows, feature = "diagnostics"))]
+        shape_made(&shape);
         self.shapes.push(shape);
         self.shape_index.insert(shape, at);
         Some(at)
@@ -1241,15 +1434,88 @@ impl Views {
         Some(View::Placed(unordered, resource, desc))
     }
 
+    /// The number of buffer shape `shape`, a new one if it is not there
+    /// yet; `None` when the [`BUFFER_SHAPES`] are full.
+    fn buffer_shape(&mut self, shape: Shape) -> Option<u32> {
+        if let Some(&at) = self.buffer_shape_index.get(&shape) {
+            return Some(at);
+        }
+        if self.buffer_shapes.len() >= BUFFER_SHAPES {
+            return None;
+        }
+        let at = self.buffer_shapes.len() as u32;
+        self.buffer_shapes.push(shape);
+        self.buffer_shape_index.insert(shape, at);
+        Some(at)
+    }
+
+    /// The buffer view [`placed_buffer_words`] named.
+    fn placed_buffer_of(&self, i: u32, generation: u32) -> Option<View> {
+        let payload = payload(i, generation);
+        let (count_bits, shift) = *BUFFER_LAYOUTS.get((payload >> 61) as usize)?;
+        let count = (payload >> BUFFER_SHAPE_BITS) as u32 & ((1 << count_bits) - 1);
+        let address_bits = PLACED_ADDRESS_BITS - shift;
+        let address = (payload >> (BUFFER_SHAPE_BITS + count_bits) & ((1 << address_bits) - 1)) << shift;
+        let shape = (payload & (BUFFER_SHAPES as u64 - 1)) as usize;
+        let &(unordered, mut resource, rest) = self.buffer_shapes.get(shape)?;
+        let mut desc = [0u32; 16];
+        desc[..10].copy_from_slice(&rest[..10]);
+        desc[count_word(unordered)] = count;
+        (desc[10], desc[11]) = (address as u32, (address >> 32) as u32);
+        desc[12..].copy_from_slice(&rest[10..]);
+        let bytes = u64::from(count) * buffer_element(unordered, &desc)?;
+        let width = if resource[4] == 0 { bytes } else { bytes.next_multiple_of(16) };
+        (resource[4], resource[5]) = (width as u32, (width >> 32) as u32);
+        Some(View::Placed(unordered, resource, desc))
+    }
+
+    /// With the table at [`entries_most`]: an entry to give to another
+    /// view, the next from [`Views::cursor`] on that holds a view whose
+    /// records could not name it whole ([`loose`]: constant buffer views and
+    /// views of placed memory that did not fit, which nothing frees) and
+    /// was not made or read for [`IDLE_S`]. `None` if the table is not full
+    /// or none of the next 64 is such an entry: the table grows then.
+    /// Views of resources are freed with them; samplers stay. (`now`: the
+    /// time in [`seconds`]; `most`: [`entries_most`].)
+    fn reusable(&mut self, now: u32, most: usize) -> Option<u32> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let n = self.list.len();
+        if n < most {
+            return None;
+        }
+        for _ in 0..64.min(n) {
+            let i = self.cursor % n;
+            self.cursor = i + 1;
+            let view = &self.list[i].0;
+            if loose(view)
+                && self.index.get(view) == Some(&(i as u32))
+                && now.saturating_sub(self.used[i].load(Relaxed)) >= IDLE_S
+            {
+                return Some(i as u32);
+            }
+        }
+        None
+    }
+
     /// The record words of `view` as a table entry, if it has one.
     fn entry_of(&self, view: &View) -> Option<[u32; 2]> {
         let &i = self.index.get(view)?;
+        // Written again: not idle.
+        if loose(view) {
+            self.used[i as usize].store(seconds(), std::sync::atomic::Ordering::Relaxed);
+        }
         Some([i, self.list[i as usize].1])
     }
 
     /// The record words of `view` as a table entry: its entry (a new or a
     /// freed one if the view is not there yet) and that entry's generation.
     fn entry(&mut self, view: View) -> [u32; 2] {
+        self.entry_at(view, seconds(), entries_most())
+    }
+
+    /// [`Views::entry`] at the time `now` with at most `most` entries
+    /// before they are given away ([`Views::reusable`]).
+    fn entry_at(&mut self, view: View, now: u32, most: usize) -> [u32; 2] {
         let i = match self.index.get(&view) {
             Some(&i) => i,
             None => {
@@ -1258,11 +1524,25 @@ impl Views {
                         self.list[i as usize].0 = view.clone();
                         i
                     }
-                    None => {
-                        self.list.push((view.clone(), 1));
-                        self.list.len() as u32 - 1
-                    }
+                    None => match self.reusable(now, most) {
+                        // Under a new generation: records that name the
+                        // old view go stale (their slots null), they do
+                        // not name this one.
+                        Some(i) => {
+                            let (old, generation) = std::mem::replace(&mut self.list[i as usize], (view.clone(), 0));
+                            self.index.remove(&old);
+                            self.list[i as usize].1 = ((generation + 1) & GENERATIONS).max(1);
+                            REUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            i
+                        }
+                        None => {
+                            self.list.push((view.clone(), 1));
+                            self.used.push(std::sync::atomic::AtomicU32::new(0));
+                            self.list.len() as u32 - 1
+                        }
+                    },
                 };
+                self.used[i as usize].store(now, std::sync::atomic::Ordering::Relaxed);
                 for r in view.resources().into_iter().filter(|&r| r != 0) {
                     self.by_resource.entry(r).or_default().push(i);
                 }
@@ -1278,6 +1558,15 @@ impl Views {
 /// kind allows ([`Views`]), else its table entry.
 fn words_for(view: View) -> [u32; 2] {
     use std::sync::atomic::Ordering::Relaxed;
+    // A buffer view of placed memory without the words the title leaves its
+    // stack in ([`blank_buffer`]): views that differ only in them are one.
+    let view = match view {
+        View::Placed(unordered, resource, desc) if buffers_whole() && resource[0] == 1 && desc[1] == 1 => {
+            let (resource, desc) = blank_buffer(unordered, &resource, &desc);
+            View::Placed(unordered, resource, desc)
+        }
+        view => view,
+    };
     if inline() {
         match &view {
             View::Constant(address, size) => {
@@ -1287,6 +1576,32 @@ fn words_for(view: View) -> [u32; 2] {
                 }
             }
             View::Placed(unordered, resource, desc) => {
+                if buffers_whole()
+                    && let Some(parts) = buffer_parts(*unordered, resource, desc)
+                {
+                    match parts {
+                        // (No buffer shape for a view whose record cannot
+                        // name it whole anyway.)
+                        Ok((shape, address, count)) if placed_buffer_words(0, address, count).is_some() => {
+                            let known = views_read().buffer_shape_index.get(&shape).copied();
+                            let words = known
+                                .or_else(|| views_write().buffer_shape(shape))
+                                .and_then(|shape| placed_buffer_words(shape, address, count));
+                            if let Some(words) = words {
+                                NAMED_WHOLE[1].fetch_add(1, Relaxed);
+                                NAMED_WHOLE[2].fetch_add(1, Relaxed);
+                                return words;
+                            }
+                            BUFFERS_SHAPED[3].fetch_add(1, Relaxed);
+                        }
+                        Ok(_) => {
+                            BUFFERS_SHAPED[2].fetch_add(1, Relaxed);
+                        }
+                        Err(why) => {
+                            BUFFERS_SHAPED[why].fetch_add(1, Relaxed);
+                        }
+                    }
+                }
                 let (shape, address) = shape_of(*unordered, resource, desc);
                 if address >> PLACED_ADDRESS_BITS == 0 {
                     // Nearly every placed view has a shape seen before.
@@ -1314,6 +1629,110 @@ fn views_read() -> std::sync::RwLockReadGuard<'static, Views> {
 
 fn views_write() -> std::sync::RwLockWriteGuard<'static, Views> {
     VIEWS.write().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Diagnostics: what tells the new shapes of placed views apart. Each new
+/// shape is compared with the last new one of its kind (unordered or not,
+/// the resource's dimension and format, the view's format and dimension).
+#[cfg(all(windows, feature = "diagnostics"))]
+struct ShapeCensus {
+    last: std::collections::BTreeMap<(bool, u32, u32, u32, u32), Shape>,
+    /// New shapes of buffers, of textures.
+    kinds: [u64; 2],
+    /// New shapes whose kind had one before.
+    compared: u64,
+    /// Of those, by word that differs: resource words 0..14, then the
+    /// view's words 0..10 and 12..16.
+    differs: [u64; 28],
+    /// Of those, the ones that differ in that word alone.
+    alone: [u64; 28],
+    made: u64,
+}
+
+#[cfg(all(windows, feature = "diagnostics"))]
+static SHAPE_CENSUS: std::sync::Mutex<ShapeCensus> = std::sync::Mutex::new(ShapeCensus {
+    last: std::collections::BTreeMap::new(),
+    kinds: [0; 2],
+    compared: 0,
+    differs: [0; 28],
+    alone: [0; 28],
+    made: 0,
+});
+
+/// The name of word `i` of a shape as [`ShapeCensus`] counts them.
+#[cfg(all(windows, feature = "diagnostics"))]
+fn shape_word(i: usize) -> String {
+    match i {
+        0..14 => format!("r{i}"),
+        14..24 => format!("v{}", i - 14),
+        _ => format!("v{}", i - 24 + 12),
+    }
+}
+
+#[cfg(all(windows, feature = "diagnostics"))]
+fn shape_made(shape: &Shape) {
+    let (unordered, resource, rest) = shape;
+    let words: Vec<u32> = resource.iter().chain(rest.iter()).copied().collect();
+    let mut census = SHAPE_CENSUS.lock().unwrap_or_else(|e| e.into_inner());
+    census.made += 1;
+    census.kinds[usize::from(resource[0] != 1)] += 1;
+    let kind = (*unordered, resource[0], resource[8], rest[0], rest[1]);
+    if let Some(before) = census.last.insert(kind, *shape) {
+        let old: Vec<u32> = before.1.iter().chain(before.2.iter()).copied().collect();
+        let differ: Vec<usize> = (0..28).filter(|&i| words[i] != old[i]).collect();
+        census.compared += 1;
+        for &i in &differ {
+            census.differs[i] += 1;
+        }
+        if let [i] = differ[..] {
+            census.alone[i] += 1;
+        }
+        if matches!(census.made, 2_000 | 20_000 | 200_000 | 1_000_000) {
+            tracing::info!(
+                "memory, shapes of placed views: the {}th new one, uav={unordered}, against the last of its kind: resource {:x?} was {:x?}; view {:x?} was {:x?}",
+                census.made,
+                resource,
+                before.1,
+                rest,
+                before.2
+            );
+        }
+    }
+}
+
+/// For the memory line: what tells the new shapes of placed views apart.
+#[cfg(all(windows, feature = "diagnostics"))]
+pub(crate) fn shape_census() -> String {
+    // (Before the census's lock: `shape_made` takes it under the views'.)
+    let buffer_shapes = views_read().buffer_shapes.len();
+    let census = SHAPE_CENSUS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut by: Vec<(u64, u64, usize)> = (0..28)
+        .filter(|&i| census.differs[i] != 0)
+        .map(|i| (census.differs[i], census.alone[i], i))
+        .collect();
+    by.sort_unstable_by(|a, b| b.cmp(a));
+    let words: Vec<String> = by
+        .iter()
+        .map(|&(n, alone, i)| format!("{} {n} ({alone} alone)", shape_word(i)))
+        .collect();
+    let load = |a: &std::sync::atomic::AtomicU64| a.load(std::sync::atomic::Ordering::Relaxed);
+    let shaped: Vec<u64> = BUFFERS_SHAPED.iter().map(load).collect();
+    format!(
+        "{} new since the start, {} of buffers, {} of textures, in {} kinds; {} compared with the last new one of their kind, words that differ: {}; buffer views named whole with their count since the start (VICTORY_VIEW_BUFFERS): {} in {} buffer shapes; buffer views given a shape of their own: {} not from their first element, {} whose width does not follow from their count, {} whose address or count does not fit a record, {} with the buffer shapes full; table entries of idle views given to another (stale records): {}",
+        census.made,
+        census.kinds[0],
+        census.kinds[1],
+        census.last.len(),
+        census.compared,
+        words.join(", "),
+        load(&NAMED_WHOLE[2]),
+        buffer_shapes,
+        shaped[0],
+        shaped[1],
+        shaped[2],
+        shaped[3],
+        load(&REUSED),
+    )
 }
 
 /// For the memory line: the distinct views kept ([`Views`]), those of them
@@ -1344,7 +1763,10 @@ pub(crate) fn views_kept() -> [u64; 8] {
         views.list.capacity() as u64 * each
             + views.index.len() as u64 * each * 3 / 2
             + views.shapes.capacity() as u64 * shape
-            + views.shape_index.len() as u64 * shape * 3 / 2,
+            + views.shape_index.len() as u64 * shape * 3 / 2
+            + views.buffer_shapes.capacity() as u64 * shape
+            + views.buffer_shape_index.len() as u64 * shape * 3 / 2
+            + views.used.capacity() as u64 * 4,
         constants,
         placed,
         views.shapes.len() as u64,
@@ -1512,10 +1934,18 @@ fn view_at(i: u32, generation: u32) -> Option<View> {
         0 => {
             let views = views_read();
             let (view, current) = views.list.get(i as usize)?;
-            (*current == generation).then(|| view.clone())
+            if *current != generation {
+                return None;
+            }
+            // Read: not idle ([`Views::reusable`]).
+            if loose(view) {
+                views.used[i as usize].store(seconds(), std::sync::atomic::Ordering::Relaxed);
+            }
+            Some(view.clone())
         }
         CONSTANT => Some(constant_of(i, generation)),
         PLACED => views_read().placed_of(i, generation),
+        PLACED_BUFFER => views_read().placed_buffer_of(i, generation),
         _ => None,
     }
 }
@@ -2036,6 +2466,167 @@ mod tests {
         assert_eq!(words(at), words(other.as_ptr() as u64));
         create_cbv(null, &[0x140, 6, 512, 0], other.as_ptr() as u64);
         assert_ne!(words(at), words(other.as_ptr() as u64));
+    }
+
+    /// The leak of run csomag-alap: buffer views of placed memory of ever
+    /// other sizes at ever other addresses are named whole with their count
+    /// (no shape and no entry each), read back as written but for the words
+    /// the title leaves its stack in, and views that differ only in those
+    /// have the same record.
+    #[test]
+    fn buffer_views_of_every_size_are_named_whole() {
+        if !inline() || !buffers_whole() {
+            return;
+        }
+        let null = std::ptr::null();
+        let slots = [0u64; 4];
+        let at = slots.as_ptr() as u64;
+        // A buffer of a kind no other test uses (its alignment word), the
+        // filler words set as the title leaves them.
+        let resource = |width: u64| -> [u32; 14] {
+            [1, 0xdead, 0x5b0f, 0, width as u32, (width >> 32) as u32, 1, 0x1_0001, 0, 1, 0, 1, 0, 0xbeef]
+        };
+        let blank = |mut r: [u32; 14], mut d: [u32; 16], unordered: bool| {
+            (r[1], r[13], d[9]) = (0, 0, 0);
+            if !unordered {
+                d[3] = 0;
+            }
+            (r, d)
+        };
+        let mine = |s: &Shape| s.1[2] == 0x5b0f;
+        let shapes = || VIEWS.read().unwrap().shapes.iter().filter(|s| mine(s)).count();
+        let buffer_shapes = || VIEWS.read().unwrap().buffer_shapes.iter().filter(|s| mine(s)).count();
+        let entries = || {
+            VIEWS.read().unwrap().list.iter().filter(|(v, _)| matches!(v, View::Placed(_, r, _) if r[2] == 0x5b0f)).count()
+        };
+        let address_of = |d: &[u32; 16]| u64::from(d[10]) | u64::from(d[11]) << 32;
+        let words = |handle: u64| unsafe { *(handle as *const [u32; 3]) };
+        for n in 0..20_000u32 {
+            // Structured shader views, 16-byte aligned, every count to
+            // 131,071 elements of 0x1a0 bytes.
+            let count = (n * 6553) % (1 << 17);
+            let address = 0x6_2000_0000 + u64::from(n) * 0x1_0000;
+            let desc = [0, 1, 0x1688, 0x3d15_3e66, 0, 0, count, 0x1a0, 0, 0xbf7a_f54c, address as u32, (address >> 32) as u32, 0x16, 0, 0, 0];
+            let r = resource(u64::from(count) * 0x1a0);
+            create_placed_srv(null, &r, &desc, at);
+            let (br, bd) = blank(r, desc, false);
+            assert_eq!(view(at), Some(View::Placed(false, br, bd)), "{n}");
+            assert_eq!(words(at)[2] >> KIND_SHIFT, PLACED_BUFFER);
+            // Raw views at 4-byte alignment, widths rounded up to 16 bytes.
+            let count = n % (1 << 15);
+            let address = address + 4;
+            let desc = [27, 1, 0x1688, 0, 0, 0, count, 0, 1, 0, address as u32, (address >> 32) as u32, 0, 0, 0, 0];
+            let r = resource((u64::from(count) * 4).next_multiple_of(16));
+            create_placed_srv(null, &r, &desc, at);
+            let (br, bd) = blank(r, desc, false);
+            assert_eq!(view(at), Some(View::Placed(false, br, bd)), "raw {n}");
+            assert_eq!(address_of(&bd), address);
+            // Unordered structured views.
+            let desc = [0, 1, 0, 0, count, 8, 0, 0, 0, 0x1234, address as u32, (address >> 32) as u32, 0, 0, 0, 0];
+            let r = resource(u64::from(count) * 8);
+            create_placed_uav(null, &r, &desc, at);
+            let (br, bd) = blank(r, desc, true);
+            assert_eq!(view(at), Some(View::Placed(true, br, bd)), "uav {n}");
+        }
+        assert_eq!(shapes(), 0, "no shapes");
+        assert_eq!(entries(), 0, "no entries");
+        // Structured; raw with its width exact and rounded up (two rules);
+        // unordered.
+        assert_eq!(buffer_shapes(), 4, "a buffer shape for each kind, not each size");
+        // The same view with other filler words: the same record; another
+        // count: another one.
+        let other = [0u64; 4];
+        let desc = [0, 1, 0x1688, 7, 0, 0, 100, 0x1a0, 0, 9, 0x2000_0000, 6, 0x16, 0, 0, 0];
+        create_placed_srv(null, &resource(100 * 0x1a0), &desc, at);
+        let mut filler = resource(100 * 0x1a0);
+        (filler[1], filler[13]) = (1, 2);
+        let mut other_desc = desc;
+        (other_desc[3], other_desc[9]) = (0x55, 0x66);
+        create_placed_srv(null, &filler, &other_desc, other.as_ptr() as u64);
+        assert_eq!(words(at), words(other.as_ptr() as u64));
+        other_desc[6] = 101;
+        create_placed_srv(null, &resource(101 * 0x1a0), &other_desc, other.as_ptr() as u64);
+        assert_ne!(words(at), words(other.as_ptr() as u64));
+    }
+
+    /// Buffer views a record cannot name whole get a shape, as before, and
+    /// read back as written (but for the filler words).
+    #[test]
+    fn buffer_views_that_do_not_fit_keep_their_shapes() {
+        if !inline() || !buffers_whole() {
+            return;
+        }
+        let null = std::ptr::null();
+        let slots = [0u64; 4];
+        let at = slots.as_ptr() as u64;
+        let address: u64 = 0x6_3000_0000;
+        let base = [1, 0, 0x5b10, 0, 0, 0, 1, 0x1_0001, 0, 1, 0, 1, 0, 0];
+        let cases: [(u32, u32, u64, u64); 4] = [
+            // (first element, count, width, address)
+            (3, 10, 13 * 16, address),
+            (0, 10, 4096, address),
+            (0, 10, 160, address + 1),
+            (0, 200_000, 200_000 * 16, address),
+        ];
+        for (first, count, width, address) in cases {
+            let mut r = base;
+            (r[4], r[5]) = (width as u32, (width >> 32) as u32);
+            let desc = [0, 1, 0x1688, 0, first, 0, count, 16, 0, 0, address as u32, (address >> 32) as u32, 0, 0, 0, 0];
+            create_placed_srv(null, &r, &desc, at);
+            // SAFETY: a slot of 32 bytes above.
+            let words = unsafe { *(at as *const [u32; 3]) };
+            assert_eq!(words[2] >> KIND_SHIFT, PLACED, "{first} {count} {width} {address:#x}");
+            assert_eq!(view(at), Some(View::Placed(false, r, desc)));
+        }
+    }
+
+    /// With the table full, a new entry takes the one of an idle view that
+    /// carries an address (one that did not fit its record) under a new
+    /// generation: records naming the old view go stale. Samplers, views of
+    /// resources and views read lately keep theirs.
+    #[test]
+    fn a_full_table_gives_idle_loose_entries_away() {
+        use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+        let mut views = Views {
+            list: Vec::new(),
+            index: std::collections::BTreeMap::new(),
+            by_resource: std::collections::BTreeMap::new(),
+            free: Vec::new(),
+            shapes: Vec::new(),
+            shape_index: std::collections::BTreeMap::new(),
+            buffer_shapes: Vec::new(),
+            buffer_shape_index: std::collections::BTreeMap::new(),
+            used: Vec::new(),
+            cursor: 0,
+        };
+        let placed = |n: u32| View::Placed(false, [1, 0, n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [n; 16]);
+        let most = 5;
+        let made: Vec<[u32; 2]> = [
+            View::Sampler([7; 13]),
+            View::Shader(0x1234, None),
+            placed(1),
+            placed(2),
+            View::Constant(1 << 50, 99),
+        ]
+        .into_iter()
+        .map(|v| views.entry_at(v, 0, most))
+        .collect();
+        assert_eq!(views.list.len(), 5);
+        // Entry 2 was read at 95: not idle at 100.
+        views.used[2].store(95, Relaxed);
+        let new = views.entry_at(placed(3), 100, most);
+        assert_eq!(views.list.len(), 5, "no new entry");
+        assert_eq!(new[0], 3, "the first idle loose entry");
+        assert_ne!(new[1], made[3][1], "under a new generation");
+        assert_eq!(views.index.get(&placed(2)), None);
+        assert_eq!(views.index.get(&placed(3)), Some(&3));
+        // Then the constant view; then none is idle: the table grows.
+        assert_eq!(views.entry_at(placed(4), 100, most)[0], 4);
+        assert_eq!(views.entry_at(placed(5), 100, most)[0], 5);
+        assert_eq!(views.list.len(), 6);
+        assert_eq!(views.list[0].0, View::Sampler([7; 13]));
+        assert_eq!(views.list[1].0, View::Shader(0x1234, None));
+        assert!(views.used.iter().all(|u: &AtomicU32| u.load(Relaxed) <= 100));
     }
 
     /// A released resource's views go stale; the same view of a new

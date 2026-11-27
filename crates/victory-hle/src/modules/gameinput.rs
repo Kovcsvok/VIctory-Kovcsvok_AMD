@@ -163,6 +163,152 @@ fn one_pad() -> bool {
     std::env::var_os("VICTORY_ONE_PAD").is_none_or(|v| v != "0")
 }
 
+/// The title lists its saves ([`auto_a`]: past the account picker).
+pub(crate) fn saves_listed() {
+    auto_a::saves_listed();
+}
+
+/// `VICTORY_AUTO_A`: for a run nobody may sit at, the stand-in pad presses A
+/// by itself now and then, until a person does anything. The account picker
+/// waits for A on a pad, and an unattended test run stood there for good.
+/// `1`: from 25 s after the input object was made to 150 s, every 5 s, for
+/// 150 ms, until the title lists its saves after a press: past the picker
+/// (run 2026-11-27 13:09: the first press at 25 s, the listing 0.5 s later;
+/// the presses after it went on through the main menu into a saved game,
+/// which is not asked for). `<from>,<until>,<every>` in seconds: for test
+/// runs, on through the menus until `until`. Any input of a person's (a
+/// button, trigger or stick of a host pad, a key held in the title's
+/// window) ends it for good, and so does the end of its time: a person who
+/// pressed A already finds nothing pressed for them afterwards.
+mod auto_a {
+    use super::{A, KeyState, PadState};
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+
+    struct Plan {
+        from: f64,
+        until: f64,
+        every: f64,
+        /// Ends when the title lists its saves after a press.
+        picker_only: bool,
+    }
+
+    /// How long one press is held, in seconds.
+    const HELD: f64 = 0.15;
+
+    fn parse(text: &str) -> Option<Plan> {
+        let text = text.trim();
+        if text == "1" {
+            return Some(Plan { from: 25.0, until: 150.0, every: 5.0, picker_only: true });
+        }
+        let mut parts = text.split(',').map(|p| p.trim().parse::<f64>().ok());
+        let (from, until, every) = (parts.next()??, parts.next()??, parts.next()??);
+        (from >= 0.0 && until > from && every > 2.0 * HELD).then_some(Plan { from, until, every, picker_only: false })
+    }
+
+    fn plan() -> Option<&'static Plan> {
+        static PLAN: OnceLock<Option<Plan>> = OnceLock::new();
+        PLAN.get_or_init(|| {
+            let plan = parse(&std::env::var("VICTORY_AUTO_A").ok()?)?;
+            tracing::info!(
+                from = plan.from,
+                until = plan.until,
+                every = plan.every,
+                picker_only = plan.picker_only,
+                "the pad presses A by itself until a person does anything (VICTORY_AUTO_A)"
+            );
+            Some(plan)
+        })
+        .as_ref()
+    }
+
+    static OVER: AtomicBool = AtomicBool::new(false);
+    static PRESSES: AtomicU32 = AtomicU32::new(0);
+
+    /// The title lists its saves: after a press, past the account picker.
+    pub(super) fn saves_listed() {
+        let Some(plan) = plan() else {
+            return;
+        };
+        if plan.picker_only && PRESSES.load(Relaxed) > 0 && !OVER.swap(true, Relaxed) {
+            tracing::info!(
+                presses = PRESSES.load(Relaxed),
+                "auto A: the title lists its saves, past the account picker; no more presses (VICTORY_AUTO_A)"
+            );
+        }
+    }
+
+    fn someone(pads: &[Option<PadState>], keys: &[KeyState]) -> bool {
+        !keys.is_empty()
+            || pads.iter().flatten().any(|p| {
+                p.buttons != 0
+                    || p.left_trigger > 0.3
+                    || p.right_trigger > 0.3
+                    || [p.left_x, p.left_y, p.right_x, p.right_y].iter().any(|v| v.abs() > 0.5)
+            })
+    }
+
+    /// The buttons pressed for nobody now (`seconds` since the input object
+    /// was made): A or none.
+    pub(super) fn buttons(seconds: f64, pads: &[Option<PadState>], keys: &[KeyState]) -> u32 {
+        let Some(plan) = plan() else {
+            return 0;
+        };
+        if OVER.load(Relaxed) {
+            return 0;
+        }
+        if someone(pads, keys) {
+            OVER.store(true, Relaxed);
+            tracing::info!(
+                seconds,
+                presses = PRESSES.load(Relaxed),
+                "auto A: a person's input; no more presses (VICTORY_AUTO_A)"
+            );
+            return 0;
+        }
+        if seconds < plan.from {
+            return 0;
+        }
+        if seconds > plan.until {
+            OVER.store(true, Relaxed);
+            tracing::info!(seconds, presses = PRESSES.load(Relaxed), "auto A: its time is over (VICTORY_AUTO_A)");
+            return 0;
+        }
+        let since = seconds - plan.from;
+        if since % plan.every >= HELD {
+            return 0;
+        }
+        let n = (since / plan.every) as u32 + 1;
+        if PRESSES.fetch_max(n, Relaxed) < n {
+            tracing::info!(n, seconds, "auto A: pressed (VICTORY_AUTO_A)");
+        }
+        A
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn plans() {
+            let p = parse("1").unwrap();
+            assert_eq!((p.from, p.until, p.every, p.picker_only), (25.0, 150.0, 5.0, true));
+            let p = parse(" 10, 60 ,4").unwrap();
+            assert_eq!((p.from, p.until, p.every, p.picker_only), (10.0, 60.0, 4.0, false));
+            assert!(parse("0").is_none() && parse("10,5,4").is_none() && parse("1,2").is_none() && parse("1,9,0.1").is_none());
+        }
+
+        #[test]
+        fn a_person_is_seen() {
+            let idle = PadState { left_x: 0.1, ..Default::default() };
+            assert!(!someone(&[Some(idle), None], &[]));
+            let pressed = PadState { buttons: A, ..Default::default() };
+            assert!(someone(&[None, Some(pressed)], &[]));
+            assert!(someone(&[], &[KeyState::default()]));
+        }
+    }
+}
+
 #[repr(C)]
 struct Table<const N: usize>([*const (); N]);
 // SAFETY: function addresses only.
@@ -435,7 +581,8 @@ impl Hub {
             let pads: [_; PADS] = std::array::from_fn(|slot| source.pad(slot));
             (pads, source.keys())
         };
-        let events = self.state().poll(&self.devices, self.one_pad, pads, keys);
+        let auto = auto_a::buttons(START.elapsed().as_secs_f64(), &pads, &keys);
+        let events = self.state().poll(&self.devices, self.one_pad, pads, keys, auto);
         self.deliver(events);
     }
 
@@ -481,11 +628,18 @@ impl State {
         one_pad: bool,
         pads: [Option<PadState>; PADS],
         keys: Vec<KeyState>,
+        auto: u32,
     ) -> Vec<Event> {
         let now = now();
         let mut events = std::mem::take(&mut self.pending);
+        // Buttons pressed for nobody ([`auto_a`]) are the stand-in's.
+        let stand_in = |keys: &[KeyState]| {
+            let mut pad = fallback(keys);
+            pad.buttons |= auto;
+            pad
+        };
         if one_pad {
-            let pad = pads.into_iter().flatten().fold(fallback(&keys), merged);
+            let pad = pads.into_iter().flatten().fold(stand_in(&keys), merged);
             self.update(devices, FALLBACK, Some(Value::Pad(pad)), now, &mut events);
             self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
             return events;
@@ -494,7 +648,7 @@ impl State {
         for (slot, pad) in pads.into_iter().enumerate() {
             self.update(devices, slot, pad.map(Value::Pad), now, &mut events);
         }
-        let fallback = (!any_pad).then(|| Value::Pad(fallback(&keys)));
+        let fallback = (!any_pad).then(|| Value::Pad(stand_in(&keys)));
         self.update(devices, FALLBACK, fallback, now, &mut events);
         self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
         events

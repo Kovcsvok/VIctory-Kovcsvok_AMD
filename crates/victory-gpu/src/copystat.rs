@@ -439,6 +439,275 @@ fn big_blocks() -> String {
     if text.is_empty() { "none".into() } else { text.join(", ") }
 }
 
+/// Where our own blocks are made, sampled (`VICTORY_HEAP_SITES=1`): one
+/// block in [`sites::SITE_SAMPLE`], chosen by its address (so its release
+/// is known to be one without a lookup), with the call stack that made it.
+/// The memory line says which places hold the most of the sampled blocks
+/// alive: after the view table's fix (Claude-34) our blocks under 4 KiB
+/// still grew by some 90,000 a minute, from nowhere the counters name.
+mod sites {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+
+    /// One block in this many is sampled (by its address).
+    pub(super) const SITE_SAMPLE: u64 = 1 << SAMPLE_BITS;
+    const SAMPLE_BITS: u32 = 10;
+    const LIVE: usize = 1 << 16;
+    pub(super) const SITES: usize = 1 << 14;
+    pub(super) const DEPTH: usize = 10;
+
+    pub(super) static ON: AtomicBool = AtomicBool::new(false);
+
+    thread_local! {
+        /// Set while this thread holds [`TABLE`] for the report.
+        static REPORTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Whether this thread holds [`TABLE`] for the report: a block it makes
+    /// or lets go then is passed over, since counting it would wait for the
+    /// lock this thread holds.
+    fn reporting_here() -> bool {
+        REPORTING.try_with(|r| r.get()).unwrap_or(false)
+    }
+
+    /// `f` with the table held, for the report. Nothing in `f` should
+    /// allocate; a block it does make or let go is not counted rather than
+    /// waited for. (A report that grew a vector under this lock hung the
+    /// whole game on 2026-11-27 at 22:44: a sampled block of its own
+    /// waited for the lock it held, then every thread behind it.)
+    pub(super) fn reporting<R>(f: impl FnOnce(&Table) -> R) -> Option<R> {
+        let t = TABLE.lock().ok()?;
+        let _ = REPORTING.try_with(|r| r.set(true));
+        let out = f(&t);
+        let _ = REPORTING.try_with(|r| r.set(false));
+        Some(out)
+    }
+
+    pub(super) struct Table {
+        /// Sampled blocks alive: address (0: none), site, bytes. Linear
+        /// probing, deletion by moving back (no tombstones).
+        live: [(usize, u32, u32); LIVE],
+        /// Places: the return addresses, blocks and bytes alive.
+        pub(super) sites: [([usize; DEPTH], u64, u64); SITES],
+        /// Sampled blocks the tables had no room for.
+        pub(super) lost: u64,
+    }
+
+    pub(super) static TABLE: Mutex<Table> = Mutex::new(Table {
+        live: [(0, 0, 0); LIVE],
+        sites: [([0; DEPTH], 0, 0); SITES],
+        lost: 0,
+    });
+
+    fn mix(x: u64) -> u64 {
+        x.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    }
+
+    /// Where the block at `at` is looked for in [`Table::live`].
+    fn home(at: usize) -> usize {
+        (mix(at as u64) >> 32) as usize % LIVE
+    }
+
+    /// Whether the block at `at` is one of the sampled.
+    pub(super) fn sampled(at: usize) -> bool {
+        ON.load(Relaxed) && mix(at as u64 >> 4) >> (64 - SAMPLE_BITS) == 0
+    }
+
+    /// A sampled block of `size` bytes was made at `at` (nothing here
+    /// allocates: the allocator calls it).
+    pub(super) fn made(at: usize, size: usize) {
+        if reporting_here() {
+            return;
+        }
+        let mut frames = [std::ptr::null_mut::<core::ffi::c_void>(); DEPTH];
+        // SAFETY: room for DEPTH frames; it walks the stack, allocating nothing.
+        unsafe {
+            windows_sys::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace(
+                2,
+                DEPTH as u32,
+                frames.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        let frames: [usize; DEPTH] = frames.map(|f| f as usize);
+        let key = frames.iter().fold(0u64, |h, &f| mix(h ^ f as u64));
+        let Ok(mut t) = TABLE.lock() else { return };
+        // Its place, or a new one: an empty slot, or else the first on the
+        // way that holds no block alive any more (taken over).
+        let (mut site, mut idle) = (None, None);
+        for probe in 0..SITES {
+            let i = ((key >> 32) as usize).wrapping_add(probe) % SITES;
+            if t.sites[i].0 == frames {
+                site = Some(i);
+                break;
+            }
+            if t.sites[i].0 == [0; DEPTH] {
+                let i = idle.unwrap_or(i);
+                t.sites[i] = (frames, 0, 0);
+                site = Some(i);
+                break;
+            }
+            if idle.is_none() && t.sites[i].1 == 0 {
+                idle = Some(i);
+            }
+        }
+        if site.is_none()
+            && let Some(i) = idle
+        {
+            t.sites[i] = (frames, 0, 0);
+            site = Some(i);
+        }
+        let Some(site) = site else {
+            t.lost += 1;
+            return;
+        };
+        let start = home(at);
+        for probe in 0..LIVE {
+            let i = (start + probe) % LIVE;
+            if t.live[i].0 == 0 || t.live[i].0 == at {
+                if t.live[i].0 == at {
+                    // (Released without our knowing: count it gone.)
+                    let (_, old, bytes) = t.live[i];
+                    let s = &mut t.sites[old as usize];
+                    s.1 = s.1.saturating_sub(1);
+                    s.2 = s.2.saturating_sub(u64::from(bytes));
+                }
+                t.live[i] = (at, site as u32, size.min(u32::MAX as usize) as u32);
+                t.sites[site].1 += 1;
+                t.sites[site].2 += size as u64;
+                return;
+            }
+        }
+        t.lost += 1;
+    }
+
+    /// The sampled block at `at` was released.
+    pub(super) fn gone(at: usize) {
+        if reporting_here() {
+            return;
+        }
+        let Ok(mut t) = TABLE.lock() else { return };
+        let start = home(at);
+        let mut i = start;
+        loop {
+            match t.live[i].0 {
+                0 => return,
+                a if a == at => break,
+                _ => i = (i + 1) % LIVE,
+            }
+            if i == start {
+                return;
+            }
+        }
+        let (_, site, size) = t.live[i];
+        let s = &mut t.sites[site as usize];
+        s.1 = s.1.saturating_sub(1);
+        s.2 = s.2.saturating_sub(u64::from(size));
+        // Deletion by moving back the entries after it whose home is not
+        // between the hole and them.
+        let mut hole = i;
+        let mut j = (i + 1) % LIVE;
+        while t.live[j].0 != 0 {
+            let want = home(t.live[j].0);
+            let stays = if hole < j { hole < want && want <= j } else { hole < want || want <= j };
+            if !stays {
+                t.live[hole] = t.live[j];
+                hole = j;
+            }
+            j = (j + 1) % LIVE;
+        }
+        t.live[hole] = (0, 0, 0);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Blocks counted in at their place and out again, with deletions
+        /// that move others back, leave every place at nothing.
+        #[test]
+        fn sampled_blocks_come_and_go() {
+            // Not through `ON`: the table alone, with addresses that collide.
+            let addresses: Vec<usize> = (1..4000usize).map(|n| n * 4096 * 7).collect();
+            for &a in &addresses {
+                made(a, 100);
+            }
+            {
+                let t = TABLE.lock().unwrap();
+                let n: u64 = t.sites.iter().map(|s| s.1).sum();
+                assert!(n >= addresses.len() as u64);
+            }
+            for &a in addresses.iter().rev().step_by(2) {
+                gone(a);
+            }
+            for &a in addresses.iter().rev().skip(1).step_by(2) {
+                gone(a);
+            }
+            let t = TABLE.lock().unwrap();
+            for &a in &addresses {
+                assert!(t.live.iter().all(|e| e.0 != a), "{a:#x} still there");
+            }
+        }
+
+        /// A block made or let go by the thread that holds the table for
+        /// the report is passed over, not waited for (it would wait for
+        /// itself: this test hangs if it does).
+        #[test]
+        fn the_report_does_not_wait_for_itself() {
+            let a = 0x7_0000_1000usize;
+            reporting(|_| {
+                made(a, 64);
+                gone(a);
+            })
+            .unwrap();
+            made(a, 64);
+            let t = TABLE.lock().unwrap();
+            assert!(t.live.iter().any(|e| e.0 == a), "made outside the report is counted");
+            drop(t);
+            gone(a);
+        }
+    }
+}
+
+/// For the memory line: the places that hold the most sampled blocks alive
+/// ([`sites`]), as offsets in our image (`victory.exe`), for the PDB.
+fn heap_sites() -> Option<String> {
+    use std::fmt::Write as _;
+    if !sites::ON.load(Relaxed) {
+        // (Read here, not in the allocator: reading it allocates.)
+        if std::env::var_os("VICTORY_HEAP_SITES").is_none_or(|v| v != "1") {
+            return None;
+        }
+        sites::ON.store(true, Relaxed);
+    }
+    // SAFETY: a plain query of our own image.
+    let base = unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null()) } as usize;
+    // Room for every place before the table is held: nothing may allocate
+    // while it is ([`sites::reporting`]).
+    let mut top: Vec<([usize; sites::DEPTH], u64, u64)> = Vec::with_capacity(sites::SITES);
+    let lost = sites::reporting(|t| {
+        top.extend(t.sites.iter().filter(|s| s.1 > 0).copied());
+        t.lost
+    })?;
+    top.sort_unstable_by(|a, b| b.2.cmp(&a.2));
+    let (blocks, bytes) = top.iter().fold((0, 0), |(n, b), s| (n + s.1, b + s.2));
+    let mut text = format!(
+        "{} sampled blocks alive (1 in {} by address, since the switch) {:.1} MB, {} places, {} lost; the most:",
+        blocks,
+        sites::SITE_SAMPLE,
+        bytes as f64 / (1 << 20) as f64,
+        top.len(),
+        lost
+    );
+    for (frames, n, b) in top.iter().take(40) {
+        let _ = write!(text, " | {n} blocks {:.0} KB at", *b as f64 / 1024.0);
+        for &f in frames.iter().filter(|&&f| f != 0) {
+            let _ = write!(text, " {:#x}", f.wrapping_sub(base));
+        }
+    }
+    Some(text)
+}
+
 /// The system's allocator with every block counted in [`OWN`] (two atomic
 /// additions per allocation and per release: diagnostics builds only).
 struct Counting;
@@ -452,6 +721,9 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
         if !at.is_null() {
             own(layout.size(), true);
             big(at, layout.size(), true);
+            if sites::sampled(at as usize) {
+                sites::made(at as usize, layout.size());
+            }
         }
         at
     }
@@ -462,6 +734,9 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
         if !at.is_null() {
             own(layout.size(), true);
             big(at, layout.size(), true);
+            if sites::sampled(at as usize) {
+                sites::made(at as usize, layout.size());
+            }
         }
         at
     }
@@ -469,6 +744,9 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
     unsafe fn dealloc(&self, at: *mut u8, layout: std::alloc::Layout) {
         own(layout.size(), false);
         big(at, layout.size(), false);
+        if sites::sampled(at as usize) {
+            sites::gone(at as usize);
+        }
         // SAFETY: the caller's contract, passed on.
         unsafe { std::alloc::System.dealloc(at, layout) };
     }
@@ -481,6 +759,12 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
             own(size, true);
             big(at, layout.size(), false);
             big(moved, size, true);
+            if sites::sampled(at as usize) {
+                sites::gone(at as usize);
+            }
+            if sites::sampled(moved as usize) {
+                sites::made(moved as usize, size);
+            }
         }
         moved
     }
@@ -941,6 +1225,14 @@ fn log_memory() {
         "memory, placed textures: {} of them were asked for again with other filler words in their description          (one resource and host copy each since the filler left the key; VICTORY_PLACED_FILLER=1 keeps it)",
         crate::resource::placed_filler_twins()
     );
+    tracing::info!("memory, shapes of placed views: {}", crate::descriptor::shape_census());
+    // Once a minute (the line is long).
+    static SITES_SAID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if SITES_SAID.fetch_add(1, Relaxed) % 12 == 0
+        && let Some(text) = heap_sites()
+    {
+        tracing::info!("memory, where our blocks were made (VICTORY_HEAP_SITES): {text}");
+    }
     // What the line above leaves open: what is alive of the buffers "made
     // so far", what the windows hold and what holds them, and what our own
     // code has allocated.
@@ -1023,6 +1315,27 @@ fn log_memory() {
         crate::host::PRELUDE_POOL[1].load(Relaxed),
         crate::host::spare_preludes(),
     );
+    // Round 4 (Claude-31): where the host lists alive are. Each holds its
+    // command allocators' memory, a megabyte or more the card shares with
+    // the PC on the RX 9070 XT, kept over resets.
+    #[cfg(windows)]
+    {
+        let alive = crate::host::ALIVE[0].load(Relaxed);
+        let (idle, idle_bytes) = crate::list::idle_lists();
+        let (backs_all, backs) = crate::list::thin::idle_backs();
+        let (flying, landed) = crate::host::lists_in_line();
+        let named = (idle + backs + flying + landed) as u64;
+        tracing::info!(
+            "memory, host lists: {alive} alive; {idle} idle in the pool ({:.0} MB of upload memory kept), {backs} \
+             held by the {backs_all} lists of ours nobody uses (VICTORY_THIN), {flying} in flights on the card, \
+             {landed} of landed flights not reset yet, {} never reset since made; the other {} are held by lists \
+             being recorded or submitted and not reset yet (VICTORY_LIST_LAZY {}), cut parts, queues and steps of ours",
+            mb(idle_bytes),
+            lists[3],
+            alive.saturating_sub(named),
+            if crate::list::lazy() { "on" } else { "off" },
+        );
+    }
     if memory_categories() {
         let fields: &[(&str, u64)] = &[
             ("working set", working),
@@ -1238,10 +1551,30 @@ pub(crate) fn present_begins() {
     add(C::TailUs, now_us().saturating_sub(SUBMITTED_AT.load(Relaxed)));
 }
 
+/// Since the last line: frames whose present came more than 50, 100 and
+/// 250 ms after the one before, and the longest gap in microseconds (the
+/// hitches the player sees, Claude-32; the frame-rate line has only the
+/// mean). Each gap of 250 ms or more is logged with its time, the first 300.
+static GAPS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
 /// A frame was presented.
 pub(crate) fn presented() {
     add(C::Frames, 1);
-    PRESENTED_AT.store(now_us(), Relaxed);
+    let now = now_us();
+    let last = PRESENTED_AT.swap(now, Relaxed);
+    if last != 0 {
+        let gap = now.saturating_sub(last);
+        for (i, over) in [50_000u64, 100_000, 250_000].into_iter().enumerate() {
+            if gap > over {
+                GAPS[i].fetch_add(1, Relaxed);
+            }
+        }
+        GAPS[3].fetch_max(gap, Relaxed);
+        static TOLD: AtomicU64 = AtomicU64::new(0);
+        if gap >= 250_000 && TOLD.fetch_add(1, Relaxed) < 300 {
+            tracing::info!(ms = gap / 1000, "a frame came {} ms after the one before", gap / 1000);
+        }
+    }
     RECORDED_SINCE.store(false, Relaxed);
     SUBMITTED_SINCE.store(false, Relaxed);
 }
@@ -1274,6 +1607,17 @@ pub(crate) fn log(frames: f64) {
     let c: Vec<f64> = (0..COUNTERS).map(|i| taken(i) as f64 / frames).collect();
     let mb = |v: f64| v / 1e6;
     let ms = |v: f64| v / 1e3;
+    {
+        let g: Vec<u64> = GAPS.iter().map(|g| g.swap(0, Relaxed)).collect();
+        tracing::info!(
+            "frame gaps since the last line ({frames:.0} frames): {} over 50 ms, {} over 100 ms, {} over 250 ms; the longest {:.1} ms;              first uses of pipelines not waited for again since the start (VICTORY_PIPELINE_WAIT_ONCE): {}",
+            g[0],
+            g[1],
+            g[2],
+            g[3] as f64 / 1e3,
+            crate::pipeline::not_waited_again()
+        );
+    }
     tracing::info!(
         "copies per frame: {:.1} submissions; {:.0} title copies {:.1} MB; {:.0} refreshes {:.1} MB, \
          {:.0} skipped {:.1} MB; {:.0} runs {:.1} ms; {:.0} queries {:.2} ms, moves {:.2} ms, \

@@ -662,6 +662,12 @@ extern "system" fn initialize_async(
     _sync_on_demand: bool,
     block: *mut AsyncBlock,
 ) -> HRESULT {
+    // When the title opens its saves, against the account picker's A
+    // (`VICTORY_AUTO_A`): the first few times.
+    static OPENED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+        tracing::info!("XGameSaveInitializeProviderAsync: the title opens its saves");
+    }
     let saves = runtime::title().saves();
     let result = if saves.parent().is_none_or(|p| p.as_os_str().is_empty()) {
         Err(NO_ACCESS)
@@ -741,6 +747,11 @@ extern "system" fn enumerate_containers(
     let (Some(p), Some(callback)) = (get(provider), callback) else {
         return E_INVALIDARG;
     };
+    static LISTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if LISTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+        tracing::info!("XGameSaveEnumerateContainerInfo: the title lists its saves");
+    }
+    super::gameinput::saves_listed();
     report(&p.root, |_| true, context, callback);
     S_OK
 }

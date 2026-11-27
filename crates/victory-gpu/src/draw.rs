@@ -3704,6 +3704,36 @@ impl State {
                                 None => crate::port_cbv::copied(true),
                             }
                         }
+                        // A page the title writes after sending, opened for the
+                        // card (`VICTORY_INPLACE_LATE_CBV`): the slot points
+                        // there and no fill is made, so nothing waits for it.
+                        // Where it is not pointed there the fill below stays,
+                        // and waits for the learned page as before.
+                        if crate::inplace::late_cbv_on()
+                            && let Some((buffer, gpu)) = crate::inplace::late_cbv_part(address, size)
+                        {
+                            let start = address as usize;
+                            let under = crate::host::flights_write(start, start + size as usize);
+                            if under {
+                                crate::inplace::late_cbv_under_flights(crate::inplace::late_cbv_guarded());
+                            }
+                            if !under || !crate::inplace::late_cbv_guarded() {
+                                let bound = if crate::port_cbv::in_place_on() {
+                                    host.constant_raw_at(index, &buffer, gpu, size)
+                                } else if gpu.is_multiple_of(256) {
+                                    host.constant_at(index, &buffer, gpu, size);
+                                    true
+                                } else {
+                                    false
+                                };
+                                if bound {
+                                    list.keep(&buffer);
+                                    crate::inplace::late_cbv_bound(size);
+                                    continue;
+                                }
+                                crate::inplace::late_cbv_slot_refused();
+                            }
+                        }
                         let Some((buffer, gpu, to)) = list.scratch_held(u64::from(size)) else {
                             host.make_null(index);
                             continue;

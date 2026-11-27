@@ -15,8 +15,9 @@ echo   [3] Port 1 nelkul (ha Port 1 meg fagyna vagy torzitana - A/B teszt)
 echo   [4] Magasabb texturak (1024 MB tex, MaxFPS 60, FSR 0.5)
 echo   [5] Kepernyokepes + teljes diagnozis (30 FPS + kepsor.ps1)
 echo   [6] Shader + Compute PSO eloforditas futtatasa (Eloforditas-AGY-v2.cmd)
+echo   [7] Elo 20s A/B meres (GPU_ONLY_COPYBACK + INPLACE_LATE_CBV, F9 videoval)
 echo.
-set /p "choice=Melyik? [1-6]: "
+set /p "choice=Melyik? [1-7]: "
 
 if "%choice%"=="1" goto opt1
 if "%choice%"=="2" goto opt2
@@ -24,6 +25,7 @@ if "%choice%"=="3" goto opt3
 if "%choice%"=="4" goto opt4
 if "%choice%"=="5" goto opt5
 if "%choice%"=="6" goto opt6
+if "%choice%"=="7" goto opt7
 
 echo Ervenytelen valasztas: %choice%
 timeout /t 2 >nul
@@ -52,6 +54,10 @@ goto done
 :opt6
 call "%~dp0Eloforditas-AGY-v2.cmd"
 exit /b %errorlevel%
+
+:opt7
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "%~dp0eszkozok\meres-agy-v2.ps1" -Nev ab-125gb -MaxFps 60 -Sharp 0.5 -Ab 20,VICTORY_GPU_ONLY_COPYBACK,VICTORY_INPLACE_LATE_CBV
+goto done
 
 :done
 set "rc=%errorlevel%"

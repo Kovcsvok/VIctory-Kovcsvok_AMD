@@ -1,6 +1,6 @@
 # Progress: VIctory on an RX 9070 XT (Kovcsvok AMD branch)
 
-Status: **27 November 2026, 12:55** (local time). The details are in [`progress/reports`](progress/reports), one report per measurement (Claude-01 … Claude-29), with a short summary of each in the [report index](progress/reports/README.md).
+Status: **28 November 2026, 00:20** (local time). The details are in [`progress/reports`](progress/reports), one report per measurement (Claude-01 … Claude-40), with a short summary of each in the [report index](progress/reports/README.md).
 
 ## In short: where are we?
 
@@ -19,6 +19,17 @@ Status: **27 November 2026, 12:55** (local time). The details are in [`progress/
 2. **Glasses reflect the sky.** The render pass responsible has not been found yet.
 3. **Frame rate:** while sailing the submitting thread waits about 20 ms a frame for the card because of the boat fix (`LEARN`), so neither the CPU nor the GPU is full (20–25 fps, GPU 36–55%).
 4. **RAM:** on 32 GB the game takes 26–27 GB. There are still items to cut (permanent host lists, the view-shape cache).
+
+## Latest: 27 November afternoon – 28 November night (Claude-30 … 40)
+
+- **Long play works:** a 23.7-minute run (menu option 0, the long-play measuring mode of Claude-35) went through without a freeze. Private memory levels off at about 26.5 GB after 20 minutes (Claude-38).
+  - The RAM overflow of a 36-minute run (35.9 GB, 4 fps) came from buffer views of every size filling the view table (Claude-34).
+  - A freeze at 12.4 minutes was our own report waiting for itself; fixed (Claude-37).
+- **Low FPS, the main cause found (Claude-39):** about 16 ms a frame the submitting thread waits for the card. Four small fills (0.2–0.5 KB) read bytes that both the card's shaders and the game's CPU write after submitting, so they need the flights to land first. Two quick tries did not help and were taken out.
+  - Next: keep those buffers on the card (`VICTORY_CARD_BUFFERS_MIN_MB`, an unattended run pair `progress/tools/kartya-par.ps1` is ready, Claude-40), or merge just those fills per dword when the card has run the flights.
+- **Picture faults reported in long play** (Claude-38): a speckled shirt, a dark blob, black ground in places. Most likely the skipped character ray-tracing resolve shaders and the lost writes through placed unordered 2D texture views; not fixed yet.
+- **Also in this period:** automatic A at the account picker (`VICTORY_AUTO_A`, for unattended runs), late fills done before the card runs them (`VICTORY_LATE_FILLS`), late constant buffers in place, lazy host lists (Claude-30 … 33), and a read-only review of Antigravity's native DXR branch (Claude-36).
+- **Checked online on 28 November** (Claude-40): no other fork has published a fix for the 16 ms wait.
 
 ## The machine and the goal
 
@@ -154,7 +165,7 @@ The full list is in each run's `futas.txt` and in [`meres-csomag.ps1`](progress/
 
 | # | Problem | Where we are | Next step |
 |---|---|---|---|
-| 1 | frame rate while sailing (20–25), the GPU not full, spikes | The submitting thread waits about 20 ms a frame for the card because of `CARD_STEPS_LEARN` (13 learned pages the game writes after submitting); the work is serialised. Spikes of 65–125 ms show on the HUD; the log only has 20 s averages. | The card reads the learned pages in place, as port 1 does for the constants heap, instead of the thread waiting (own switch, live A/B). For the spikes: a per-frame log first. |
+| 1 | low frame rate (slow scenes about 40–48 ms a frame), the card idle about 32 ms a frame | Claude-39: the submitting thread waits 16 ms a frame for flights to land, for four small fills on learned pages that the card's shaders also write. Keeping the threads awake: no effect; doing the fills before landing: 5 ms slower and wrong bytes. | Card copies for those buffers (`kartya-par.ps1`, about 55 min unattended), or a per-dword merge of just those fills (Claude-39 §4). |
 | 2 | garbage faces, vanishing beard, boat side gone at a distance, odd eyebrows and eyelashes | More than 16,000 lost writes a run into BC1/BC3/BC4/BC7 (and one B8G8R8A8) textures (`placed unordered texture view not mirrored`). D3D12 does not allow writable views of compressed formats. The views carry no address (words 10–14 are 0, Claude-29). | Follow where the game completes the record (most likely it writes the address into the descriptor record itself; port 2's fallback finds such records). Then: an uncompressed "block twin" texture and a copy into the real one, behind `VICTORY_BC_WRITES`. |
 | 3 | glasses reflect the sky | The clamp after `CS_UpdateHistory` has no effect; the source is another pass. | Find the reflecting render pass. |
 | 4 | RAM (26–27 GB for the game) | The prelude pool and the staging cap are done. | Lazy permanent host lists (1–2 GB); the view-shape cache (up to 1 GB); `VICTORY_RESIDENCY` only with `VICTORY_BURY_LAG=64`. |
@@ -164,7 +175,8 @@ The full list is in each run's `futas.txt` and in [`meres-csomag.ps1`](progress/
 - Claude-26: the direction for restoring the lost writes;
 - Claude-27: whether `PRELUDE_POOL` is the default everywhere;
 - Claude-28: whether writes into compressed textures are the next fix;
-- Claude-29: whether reading the learned pages in place (against the 20 ms wait) comes first.
+- Claude-29: whether reading the learned pages in place (against the 20 ms wait) comes first;
+- Claude-39/40: whether the card-copies run pair comes before the per-dword merge.
 
 ## How we measure
 
