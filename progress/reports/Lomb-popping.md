@@ -1,23 +1,27 @@
-# Eltűnő fák és környezeti tárgyak
+# Vanishing trees and environment objects
 
-**Első javítási próba:** az 1-es profil beállításaival, de az indirekt GPU-parancsok óvatosabb kötegelésével indítsd a játékot. A külön indító a gépen a `C:\Games\NOT_GTAVI\meresek\Lomb-proba.cmd`. Nem igényel fordítást.
+(A note by Codex.)
 
-| Indítás a mérésmappából | Mire való? |
+**First fix attempt:** start the game with profile 1's settings, but with more careful batching of the indirect GPU commands. The separate launcher on the machine is `C:\Games\NOT_GTAVI\meresek\Lomb-proba.cmd`. It needs no build.
+
+| Start from the measurement folder | What it is for |
 |---|---|
-| `Lomb-proba.cmd` | Az 1-es profil egyetlen módosítással: `VICTORY_INDIRECT_BATCH=1`. A portok, PC-s FSR, 512 px és a 250 ms-os textúra-újranézés maradnak. |
-| `Inditas-Csomag.cmd` → `1` | A játszható alap, kötegelés 2. Azonos mentésből ennek a képéhez és sebességéhez hasonlíts. |
-| `Lomb-proba.cmd diag 210` | Az alap kötegeléssel naplózza a láthatósági számításokat, és a renderelő saját időszámításának 210–240. másodpercében keresi a képi villanásokat. A 210 tetszés szerint cserélhető. A részletes számlálás az egész futásban aktív, ezért a diagnosztikai menet sebessége nem összehasonlítási alap. |
+| `Lomb-proba.cmd` | Profile 1 with a single change: `VICTORY_INDIRECT_BATCH=1`. The ports, PC FSR, 512 px and the 250 ms texture re-check stay. |
+| `Inditas-Csomag.cmd` → `1` | The playable base, batching 2. Compare against its picture and speed, from the same save. |
+| `Lomb-proba.cmd diag 210` | With the default batching it logs the visibility passes, and looks for flashes in the picture in seconds 210–240 of the renderer's own clock. 210 can be replaced as needed. The detailed counting is active for the whole run, so the diagnostic run's speed is no basis for comparison. |
 
-**Mit nézz játék közben?** Amikor látszik egy villogó fasor, egy pillanatra állítsd meg a járművet, és tartsd ugyanott a kamerát. Külön jelenség, amikor egy távoli fa először jelenik meg közeledéskor, és amikor a már megrajzolt lombkorona ugyanott eltűnik és visszajön. Elsősorban a második jelenséget próbáljuk javítani. Ha a próba nem segít, a játszható alap továbbra is az eredeti 1-es.
+**What to watch while playing?** When a flickering tree line is visible, stop the vehicle for a moment and keep the camera in the same place. It is a different phenomenon when a distant tree appears for the first time while approaching, and when an already drawn canopy vanishes and returns in the same place. We are mainly trying to fix the second. If the test does not help, the playable base stays the original option 1.
 
-## Mi indokolja a próbát?
+## What justifies the test?
 
-- A 20:51-es és 20:56-os menetből 271 + 324 olyan naplósor volt, amely az indirekt parancslista keretének kimerülése miatt üresen lefutó rekordokat méri. A legnagyobb kiírt érték mindkettőben **0,00 rekord/képkocka**. Ezek kerekített intervallumátlagok. A keret megemelésére gyenge az indok.
-- Mindkét menet naplójában szerepel a `tree` (`55679a0547649d0b`), `tree_imposter` (`89d08e561897d4e5`), `slod` (`1c4b3c0547e3e6fa`) és `meshlet_args` (`9146291b38ea9ce1`) compute shader első bekötése. Ez csak a programok elérhetőségét igazolja. Az egyes fákhoz előállított példányszámot az eddigi napló nem tartalmazza. A két képsor eltérő útvonalat és átvezetőket mutat, emiatt belőlük nem állapítható meg a két profil közti villogási arány.
-- A `crates/victory-gpu/src/draw.rs` fájlban a `State::buffers_written` 1-es módban eldobja az addigi köteget, miután egy shader írhatta a puffert. A 2-es módban megjelöli, és a következő felismert szinkronizációig vagy rajzolásig tovább használhatja az indirekt számítások közt. Ha a láthatósági lánc egy lépése régi argumentumokat kap, az egész tárgy hiányozhat. Ez a próba hipotézise. A sűrűbb újraszámítás időbe kerülhet. A szükséges kapcsoló a jelenlegi programban benne van.
+- The 20:51 and 20:56 runs had 271 + 324 log lines measuring records that ran empty because the indirect command list's budget was used up. The largest value printed in both is **0.00 records a frame**. These are rounded interval averages. There is little reason to raise the budget.
+- Both runs' logs contain the first binding of the `tree` (`55679a0547649d0b`), `tree_imposter` (`89d08e561897d4e5`), `slod` (`1c4b3c0547e3e6fa`) and `meshlet_args` (`9146291b38ea9ce1`) compute shaders. That only shows the programs are available. The log so far has no instance count produced for individual trees. The two frame strips show different routes and cutscenes, so the flicker rate of the two profiles cannot be told from them.
+- In `crates/victory-gpu/src/draw.rs`, in mode 1 `State::buffers_written` drops the batch so far after a shader may have written the buffer. In mode 2 it marks it, and may keep using it among the indirect passes until the next recognised synchronisation or draw. If one step of the visibility chain gets old arguments, the whole object may be missing. That is the test's hypothesis. Recomputing more often may cost time. The switch needed is in the current program.
 
-## Ha még villog
+## If it still flickers
 
-A `VICTORY_WALLS_TRACE=1` által kiírt `walls trace: the frame's main pass` sorok a `tree`, `tree_imposter`, `slod`, `meshlet_args` és `depth_pyramid_cpu_occlusion` műveletek rögzítéseit számolják. A `VICTORY_POP_WATCH` a szomszédos kiírt képek eltéréseit keresi. A diagnosztikai futás saját mappájában a `victory.log` és a `popwatch` könyvtár tartozik össze. A szerző implementációja kihagyhat mintákat, például összetett képrétegek megjelenítésekor. Üres képmappa esetén a már meglévő képsor időpontja használható tájékozódásra.
+The `walls trace: the frame's main pass` lines written by `VICTORY_WALLS_TRACE=1` count the recordings of the `tree`, `tree_imposter`, `slod`, `meshlet_args` and `depth_pyramid_cpu_occlusion` operations. `VICTORY_POP_WATCH` looks for differences between neighbouring captured pictures. In the diagnostic run's own folder, `victory.log` and the `popwatch` folder belong together. The author's implementation may skip samples, for example when composite picture layers are presented. With an empty picture folder, the existing frame strip's time can be used for orientation.
 
-A villanás előtti, alatti és utáni képen ugyanazt a parti foltot hasonlítsd össze a környező frame-azonosítók műveleteivel. Ha a fa és távoli helyettesítője közötti váltásra mutatnak az adatok, a következő kódmódosítás a kiválasztott GPU-argumentumpuffer **végrehajtáskor ténylegesen kiolvasott** darabszámát kövesse. A compute-hívások darabszámából egy fa láthatósága nem állapítható meg. Ha a rajzolás megmarad a villanáskor is, a lomb anyagának átlátszósági maszkját és mipválasztását vizsgáljuk.
+Compare the same patch of shore in the pictures before, during and after the flash with the operations of the surrounding frame identifiers. If the data point to a switch between a tree and its distant stand-in, the next code change should follow the count **actually read at execution** from the selected GPU argument buffer. A tree's visibility cannot be told from the number of compute calls. If the draw remains even during the flash, we look at the leaf material's transparency mask and mip selection.
+
+*(Later: `INDIRECT_BATCH=1` did not help (Claude-18); the cause was null twin views in the tree culling pass, fixed with `VICTORY_TWIN_MOVE` (Claude-21).)*

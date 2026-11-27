@@ -1,6 +1,6 @@
 # Reports: index with English summaries
 
-Claude-01 … Claude-29 are in English (translated on 27 November; the originals were Hungarian). The C1 decision and the notes from Codex and Antigravity are still being translated. Each one is one measurement or decision, in order. Times are local (CET).
+Every report and note here is in English (translated on 27 November; the originals were Hungarian). New reports are written in English. Each one is one measurement or decision, in order. Times are local (CET).
 
 Image and video links in the reports do not open here: this repository is text-only (see `docs/asset-policy.md`).
 

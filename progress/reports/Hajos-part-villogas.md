@@ -1,15 +1,17 @@
-# Hajós küldetés – a jobb parti lombkorona villogása
+# Boat mission – the right-hand shore's canopy flickers
 
-A 20261126-202038-csomag-512-pcfsr menethez tartozó képsor első fájlja 20:28:26.765-kor készült. A vizsgált perc a felvétel 3:00–4:00 szakasza. A napló UTC-ben, a JPEG-fájlnevek helyi időben vannak.
+(A note by Codex.) The first file of the frame strip for the run 20261126-202038-csomag-512-pcfsr was taken at 20:28:26.765. The minute examined is 3:00–4:00 of the recording. The log is in UTC, the JPEG file names in local time.
 
-| Felvétel | Eredeti JPEG | Mi látszik a jobb parton? |
+| Recording | Original JPEG | What is visible on the right-hand shore? |
 |---|---|---|
-| 3:44.116 | 203210-881.jpg | Nagy, sötét lombkorona az ég előtt. |
-| 3:44.368 | 203211-133.jpg | A nagy lombkorona helyén ég és alacsonyabb növényzet látszik. |
-| 3:44.619 | 203211-384.jpg | A nagy lombkorona visszatér, miközben a hajó tovább halad. |
+| 3:44.116 | 203210-881.jpg | A large, dark canopy against the sky. |
+| 3:44.368 | 203211-133.jpg | Where the large canopy was, sky and lower vegetation show. |
+| 3:44.619 | 203211-384.jpg | The large canopy returns while the boat moves on. |
 
-[A három eredeti képből vett azonos képkivágás](Hajos-part-3m44.jpg). A teljes képek a játék mappájától a `meresek/kepsor/20261126-202826-csomag-pcfsr/` útvonalon találhatók. A képsor kb. 4 kép/s-os. A jelenség bizonyítható, a pontos időtartama nem olvasható ki.
+The same crop of the three original pictures: `Hajos-part-3m44.jpg` (local only). The full pictures are under `meresek/kepsor/20261126-202826-csomag-pcfsr/` from the game's folder. The frame strip is about 4 pictures a second. The phenomenon can be shown, but its exact duration cannot be read.
 
-A `victory.log` 19:32:11.954895Z-kor kiírt összesítése 30,1 FPS, 9683 várakozó textúraslot, 86 host pipeline hiányában eldobott művelet és 78 eldobott indirekt művelet képkockánként. A közel egyidejű diagnosztika 0,00 olyan indirekt rekordot mér képkockánként, amely a lista keretének elfogyása miatt futott üresen. Az összesített számlálókhoz nem tartozik tárgyazonosító. A megelőző részletes bontás a kikapcsolt sugárkövetéshez tartozó műveleteket is felsorol az eldobások között.
+The `victory.log` summary written at 19:32:11.954895Z shows 30.1 fps, 9,683 waiting texture slots, 86 operations dropped for lack of a host pipeline and 78 dropped indirect operations a frame. The nearly simultaneous diagnostics measure 0.00 indirect records a frame that ran empty because the list's budget ran out. The aggregate counters carry no object identifier. The detailed breakdown before it also lists operations belonging to the turned-off ray tracing among the drops.
 
-**Fejlesztési irány.** Az eltűnés–visszatérés erősebb nyom, mint a textúrasor hossza. A már előkészített 250 ms-os profil próbakörében ugyanezt a sziluettváltást keressük. Ha fennmarad, nézzük meg, hogy a növényzet rajzolási parancsa mindkét állapotban lefut-e. Ha eltűnik a parancs vagy a példányszám, az objektum láthatóságát és a részletességi szintek váltását vizsgáljuk. Ha a rajzolás és a példányszám megmarad, a levélanyag átlátszósági maszkja, a kiválasztott mip és a hozzá kötött textúra a következő nyom. A fa konkrét shaderét a jelenlegi napló nem azonosítja.
+**Development direction.** Vanishing and returning is a stronger lead than the length of the texture queue. In the test round of the already prepared 250 ms profile we look for the same silhouette change. If it persists, check whether the vegetation's draw command runs in both states. If the command or the instance count disappears, look at object visibility and the switching of levels of detail. If the draw and the instance count remain, the leaf material's transparency mask, the selected mip and the texture bound to it are the next lead. The current log does not identify the tree's specific shader.
+
+*(Later, Claude-21: the cause was null twin views in the tree culling pass, fixed with `VICTORY_TWIN_MOVE`.)*
