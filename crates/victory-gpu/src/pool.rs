@@ -35,6 +35,20 @@ const SPARE_KEPT: usize = 64;
 /// The same of blocks of staging buffers, which are the PC's memory: run
 /// crash-1 held 5.2 GB of them.
 const STAGING_KEPT: usize = 8;
+/// Optional cap on fully empty 64 MiB system-memory upload blocks
+/// (`VICTORY_STAGING_SPARES=<n>`, at most [`STAGING_KEPT`]): checked once a
+/// second ([`room`]), not only when a piece comes back. Keep the existing
+/// cap unless the run explicitly asks for a smaller one. (Codex, 2026-11-27:
+/// in the 11:31 run the staging blocks grew to 576 MB while the world loaded
+/// and stayed there to the end, on a 32 GB machine with 1.5–6 GB free.)
+static STAGING_LIMIT: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    std::env::var("VICTORY_STAGING_SPARES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(STAGING_KEPT)
+        .min(STAGING_KEPT)
+});
+static STAGING_CREATED: AtomicU64 = AtomicU64::new(0);
 /// How many are kept now.
 static SPARES: AtomicUsize = AtomicUsize::new(SPARE);
 
@@ -43,7 +57,11 @@ static SPARES: AtomicUsize = AtomicUsize::new(SPARE);
 /// Asked once a second.
 pub(crate) fn room(memory: Option<[u64; 4]>) {
     if !crate::residency::on() {
-        SPARES.store(spares(memory, crate::host::keep_freed()), Ordering::Relaxed);
+        let limit = spares(memory, crate::host::keep_freed());
+        SPARES.store(limit, Ordering::Relaxed);
+        if *STAGING_LIMIT < STAGING_KEPT && let Ok(mut staging) = STAGING.try_lock() {
+            staging.reclaim(now(), limit, true);
+        }
         return;
     }
     // (`VICTORY_RESIDENCY=1`, codec-d/cool_fox c64fc9b4/e94d277a: fewer
@@ -357,7 +375,8 @@ struct Upload(ID3D12Resource, *mut u8);
 unsafe impl Send for Upload {}
 
 static TEXTURES: Mutex<Pool<ID3D12Heap>> = Mutex::new(Pool::new(SPARE_KEPT));
-static STAGING: Mutex<Pool<Upload>> = Mutex::new(Pool::new(STAGING_KEPT));
+static STAGING: std::sync::LazyLock<Mutex<Pool<Upload>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Pool::new(*STAGING_LIMIT)));
 
 fn lock<T>(m: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -375,6 +394,13 @@ pub(crate) fn texture_room() -> u64 {
 /// For the memory line: blocks of textures and of staging buffers, in MiB.
 pub(crate) fn memory() -> [u64; 2] {
     [lock(&TEXTURES).blocks() as u64 * (BLOCK >> 20), lock(&STAGING).blocks() as u64 * (BLOCK >> 20)]
+}
+
+/// Blocks immediately reusable and successful block allocations since start.
+pub(crate) fn staging_stats() -> (usize, u64) {
+    let pool = lock(&STAGING);
+    let empty = pool.blocks.iter().flatten().filter(|block| block.free.whole(BLOCK)).count();
+    (empty, STAGING_CREATED.load(Ordering::Relaxed))
 }
 
 /// Part of a block of mapped upload memory, back in the pool when dropped.
@@ -402,6 +428,7 @@ pub(crate) fn staging(host: &crate::host::Host, bytes: u64) -> Option<(StagingPi
             return None;
         }
         let (buffer, data) = host.upload_buffer(BLOCK)?;
+        STAGING_CREATED.fetch_add(1, Ordering::Relaxed);
         crate::host::name(&buffer, || "staging of textures (a block)".into());
         Some(Upload(buffer, data))
     })?;

@@ -50,6 +50,9 @@
 #             után egy közös, legfeljebb 192 darabos készletbe kerülnek. Ezen a kártyán minden lista legalább 1 MB
 #             megosztott RAM-ot foglal; a 10:52-es menetben 1909 előtét élt, a próbán 292 (kb. 1-1,5 GB-tal
 #             kevesebb, Claude-27); 'ki' = a régi mód
+#   -FeltoltoBlokk '2' (alap, 11-27 12:20 óta) = VICTORY_STAGING_SPARES=2: a textúrák 64 MB-os feltöltő
+#             blokkjaiból legfeljebb ennyi üres marad, másodpercenként ellenőrizve (Codex ötlete és kódja,
+#             Claude-29). A 11:31-es menetben ezek a betöltéstől végig 576 MB-ot foglaltak; 'alap' = 8, a régi mód
 #   Videó: a játékban F9 indítja és ugyanaz állítja le a felvételt (HUD: piros REC); a fájl
 #             a menet mappájába kerül, felvetel-<UTC idő>.mp4 néven.
 #   -DryRun   csak előkészít, nem indít játékot
@@ -73,6 +76,7 @@ param(
     [ValidateSet('ki', 'be')][string]$Tukrozes = 'ki',
     [ValidateSet('be', 'ki')][string]$KartyaLepes = 'be',
     [ValidateSet('be', 'ki')][string]$ListaKeszlet = 'be',
+    [ValidateSet('alap', '0', '1', '2', '4')][string]$FeltoltoBlokk = '2',
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -136,6 +140,7 @@ if ($Port2 -eq 'ki') {
 if ($Learn -eq 'ki') { $settings.VICTORY_CARD_STEPS_LEARN = '0' }
 if ($KartyaLepes -eq 'ki') { $settings.Remove('VICTORY_CARD_STEPS') }
 if ($ListaKeszlet -eq 'be') { $settings.VICTORY_PRELUDE_POOL = '1' }   # kevesebb RAM (Claude-27)
+if ($FeltoltoBlokk -ne 'alap') { $settings.VICTORY_STAGING_SPARES = $FeltoltoBlokk }   # kevesebb RAM (Codex, Claude-29)
 if ($RtFeloldas -eq 'ki') {
     $rtList = Join-Path $meresek 'csomag\rt-feloldo-shaderek.txt'
     if (-not (Test-Path -LiteralPath $rtList)) { throw "Hiányzik: $rtList" }
@@ -178,7 +183,7 @@ $hash = (Get-FileHash -LiteralPath $victory -Algorithm SHA256).Hash
     "Indítva (UTC): $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))",
     "Kódfa: $tree, ág $branch, HEAD $head",
     "victory.exe: $victory, SHA-256 $hash",
-    "Profil: Belobug rx9070xt csomag, Series S, $(if ($Safe) { '-Safe, renderer-portok nélkül' } else { 'renderer-portok ' + ((@(@('1', $Port1), @('2', $Port2), @('5', 'be'), @('6', 'be'), @('7', 'be')) | Where-Object { $_[1] -eq 'be' } | ForEach-Object { $_[0] }) -join ', ') + $(if ($Port1 -eq 'ki' -or $Port2 -eq 'ki') { ' (' + ((@(@('1', $Port1), @('2', $Port2)) | Where-Object { $_[1] -eq 'ki' } | ForEach-Object { $_[0] + '-es' }) -join ' és ') + ' nélkül)' } else { '' }) }), textúrakorlát $(if ($TexMax -ne 'alap') { "$TexMax px" } else { 'a csomag alapértéke' }), $(if ($NoPcFsr) { 'a játék saját FSR-je' } else { 'PC-s AMD FSR' }), textúra-újranézés $(if ($LookMs -ne 'alap') { "legalább $LookMs ms-onként" } else { 'a csomag alapja' }), KEEP_SHOWN $(if ($KeepShown -ne 'alap') { $KeepShown } else { 'a csomag alapja (1)' })$(if ($Kepsor) { ', képsor 3 kép/s' }), FPS-korlát $(switch ($MaxFps) { '60' { '60' } 'nincs' { 'nincs' } default { 'a játéké (30)' } }), FSR-élesítés $(if ($Sharp -ne 'alap') { $Sharp } else { 'a játéké' }), fa-javítás (fix/popin 7ab13ed) $(if ($Safe -or $Port1 -eq 'ki') { 'hatástalan (1-es port nélkül)' } elseif ($FaJavitas -eq 'ki') { 'kikapcsolva' } else { 'bekapcsolva' }), fa-eltűnés elleni VICTORY_TWIN_MOVE bekapcsolva (saját, az avatarmanz PR 437 nyomán; a PR saját TWIN_EXACT-je ezen a kártyán összeomlik), előtét-listák közös készletben (VICTORY_PRELUDE_POOL) $(if ($ListaKeszlet -eq 'be') { 'bekapcsolva' } else { 'kikapcsolva' }), csónak-lépések a kártyán (VICTORY_CARD_STEPS)$(if ($KartyaLepes -eq 'ki') { 'kikapcsolva (pontos, lassabb ellenőrzés)' } else { '2' }), csónak-javítás (CARD_STEPS_LEARN, avatarmanz PR 434) $(if ($Learn -eq 'be') { 'bekapcsolva (képhű, lassabb)' } else { 'kikapcsolva (gyors; nyúló alakok és eltűnő szakáll)' }), karakteres RT-feloldás (42 CS_RaytracingResolve) $(if ($RtFeloldas -eq 'be') { 'fut' } else { 'kihagyva' }), szemüveg-korlát (VICTORY_REFLECT_HOLD) $(if ($AB -match 'VICTORY_REFLECT_HOLD') { 'élő próbában váltva' } elseif ($Tukrozes -eq 'be') { 'bekapcsolva' } else { 'kikapcsolva' })$(if ($AB) { ", élő kapcsolók (VICTORY_AB): $AB" })",
+    "Profil: Belobug rx9070xt csomag, Series S, $(if ($Safe) { '-Safe, renderer-portok nélkül' } else { 'renderer-portok ' + ((@(@('1', $Port1), @('2', $Port2), @('5', 'be'), @('6', 'be'), @('7', 'be')) | Where-Object { $_[1] -eq 'be' } | ForEach-Object { $_[0] }) -join ', ') + $(if ($Port1 -eq 'ki' -or $Port2 -eq 'ki') { ' (' + ((@(@('1', $Port1), @('2', $Port2)) | Where-Object { $_[1] -eq 'ki' } | ForEach-Object { $_[0] + '-es' }) -join ' és ') + ' nélkül)' } else { '' }) }), textúrakorlát $(if ($TexMax -ne 'alap') { "$TexMax px" } else { 'a csomag alapértéke' }), $(if ($NoPcFsr) { 'a játék saját FSR-je' } else { 'PC-s AMD FSR' }), textúra-újranézés $(if ($LookMs -ne 'alap') { "legalább $LookMs ms-onként" } else { 'a csomag alapja' }), KEEP_SHOWN $(if ($KeepShown -ne 'alap') { $KeepShown } else { 'a csomag alapja (1)' })$(if ($Kepsor) { ', képsor 3 kép/s' }), FPS-korlát $(switch ($MaxFps) { '60' { '60' } 'nincs' { 'nincs' } default { 'a játéké (30)' } }), FSR-élesítés $(if ($Sharp -ne 'alap') { $Sharp } else { 'a játéké' }), fa-javítás (fix/popin 7ab13ed) $(if ($Safe -or $Port1 -eq 'ki') { 'hatástalan (1-es port nélkül)' } elseif ($FaJavitas -eq 'ki') { 'kikapcsolva' } else { 'bekapcsolva' }), fa-eltűnés elleni VICTORY_TWIN_MOVE bekapcsolva (saját, az avatarmanz PR 437 nyomán; a PR saját TWIN_EXACT-je ezen a kártyán összeomlik), előtét-listák közös készletben (VICTORY_PRELUDE_POOL) $(if ($ListaKeszlet -eq 'be') { 'bekapcsolva' } else { 'kikapcsolva' }), üres feltöltő blokkok legfeljebb $(if ($FeltoltoBlokk -eq 'alap') { '8 (régi mód)' } else { "$FeltoltoBlokk (VICTORY_STAGING_SPARES)" }), csónak-lépések a kártyán (VICTORY_CARD_STEPS)$(if ($KartyaLepes -eq 'ki') { 'kikapcsolva (pontos, lassabb ellenőrzés)' } else { '2' }), csónak-javítás (CARD_STEPS_LEARN, avatarmanz PR 434) $(if ($Learn -eq 'be') { 'bekapcsolva (képhű, lassabb)' } else { 'kikapcsolva (gyors; nyúló alakok és eltűnő szakáll)' }), karakteres RT-feloldás (42 CS_RaytracingResolve) $(if ($RtFeloldas -eq 'be') { 'fut' } else { 'kihagyva' }), szemüveg-korlát (VICTORY_REFLECT_HOLD) $(if ($AB -match 'VICTORY_REFLECT_HOLD') { 'élő próbában váltva' } elseif ($Tukrozes -eq 'be') { 'bekapcsolva' } else { 'kikapcsolva' })$(if ($AB) { ", élő kapcsolók (VICTORY_AB): $AB" })",
     "Beállítások: $(($settings.Keys | ForEach-Object { "$_=$($settings[$_])" }) -join ' ')",
     'Indítás előtti állapot:'
 ) + ($pre | ForEach-Object { "  $_" }) | Set-Content -LiteralPath $info -Encoding UTF8
