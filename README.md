@@ -1,3 +1,5 @@
+# VIctory-Kovcsvok_AMD
+
 > **Kovcsvok AMD-ág (RX 9070 XT):** ez a repó a [Belobug rx9070xt](https://github.com/Belobug/VIctory-Belobug-AMD/tree/rx9070xt)
 > ágra (`cd8dfc06`) épül, rajta a helyben mért és javított „csomag”. **Hol tartunk, mi működik, mi a következő
 > lépés: [HALADAS.md](HALADAS.md).** A jelentések, tervek és mérőeszközök a [`haladas/`](haladas) mappában vannak.
