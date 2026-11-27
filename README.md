@@ -4,7 +4,7 @@
 
 **This repository contains nothing from the game:** no files, code, textures or screenshots. You need your own copy of the game. It is not affiliated with or endorsed by the game's developer or publisher.
 
-> **If you are picking this up (human or AI):** read this file first, then [PROGRESS.md](PROGRESS.md), then the latest report ([Claude-28](progress/reports/Claude-28-20261127-1155.md), in Hungarian; English summaries of all reports are in the [report index](progress/reports/README.md)). The next task, with code locations, is under [What comes next](#what-comes-next).
+> **If you are picking this up (human or AI):** read this file first, then [PROGRESS.md](PROGRESS.md), then the latest report ([Claude-29](progress/reports/Claude-29-20261127-1240.md); a summary of every report is in the [report index](progress/reports/README.md)). The next task, with code locations, is under [What comes next](#what-comes-next).
 
 ## Status: 27 November 2026
 
@@ -42,9 +42,9 @@
 
 | Problem | Cause | Status |
 |---|---|---|
-| Colourful blocky garbage on some faces; Cal's beard and moustache vanish; a tourist boat's side turns see-through at a distance; Lucia's eyebrows and eyelashes look wrong | **Suspected:** the game writes compressed (BC1/BC4/BC7) textures itself on the GPU, and those writes are lost here | **next task**, see below |
+| Colourful blocky garbage on some faces; Cal's beard and moustache vanish; a tourist boat's side turns see-through at a distance; Lucia's eyebrows and eyelashes look wrong | **Suspected:** the game writes compressed (BC1/BC4/BC7) textures itself on the GPU, and those writes are lost here | second in line, see below |
 | Glasses reflect the sky | an unknown render pass; a clamp after `CS_UpdateHistory` did not help | open |
-| 20–25 fps while sailing | `CARD_STEPS_LEARN` waits about 10–17 ms a frame | open; the picture comes first for now |
+| 20–25 fps while sailing; the GPU is only 36–55% busy; spikes of 65–125 ms | the submitting thread waits about 20 ms a frame for the card (`CARD_STEPS_LEARN`), so CPU and GPU take turns instead of working together | **next**, see below |
 | RAM is tight (26–27 GB for the game) | permanent host lists (about 1,900), the view-shape cache (up to 1 GB) | open |
 | Clouds jump a little | not looked into | open |
 
@@ -52,7 +52,7 @@ The full history is in [PROGRESS.md](PROGRESS.md) and in the [reports](progress/
 
 ## What is new in this branch
 
-Compared with Belobug's `cd8dfc06`: one commit (`643a55a`), 24 files. All new behaviour is behind switches.
+Compared with Belobug's `cd8dfc06`: two code commits (`643a55a`, `16bdcf1`), 25 files. All new behaviour is behind switches.
 
 **Our own:**
 
@@ -61,6 +61,7 @@ Compared with Belobug's `cd8dfc06`: one commit (`643a55a`), 24 files. All new be
 | `VICTORY_TWIN_MOVE` | The twin views of the tree culling pass (`CS_Tree_BatchCull`) no longer become null: they were made outside the thread's own workspace, so they are moved (`descriptor/host.rs`) | **on** (on by default in code too) |
 | `VICTORY_PRELUDE_POOL` | Host lists take their prelude lists from a shared pool of at most 192 spare ones. AMD's driver keeps at least 1 MB of shared memory per command allocator and does not give it back: 432 preludes instead of 1,909, about 1 GB less (`host.rs`, `list.rs`) | **on** (off by default in code) |
 | `VICTORY_LIST_IDLE_MOST` | cap on idle host lists (default 512) | not set |
+| `VICTORY_STAGING_SPARES` | at most this many empty 64 MiB texture upload blocks kept, checked every second (`pool.rs`; idea and code by Codex, commit `16bdcf1`): 576 → 448 MB | **2** (8 in code, unchanged) |
 | `VICTORY_REFLECT_HOLD` | the glasses-test clamp; measured with no effect | off |
 | F9 video (`record.rs`) | H.264 MP4 into the run's folder (`VICTORY_RECORD_DIR`), with the HUD clock in the picture. Closed properly even when the window is closed (`lifecycle.rs` → `end_recording`). | always |
 | Logging | all 16 words of the views behind lost BC texture writes; memory lines in `copystat.rs` (preludes, pool, host lists) | `diagnostics` builds |
@@ -100,7 +101,7 @@ target\diag\victory.exe warm --used                            # builds pipeline
 
 ### The measured profile (menu option `1`) by hand
 
-The measurements are started by the menu in [`progress/tools/Inditas-Csomag.cmd`](progress/tools/Inditas-Csomag.cmd) and by [`meres-csomag.ps1`](progress/tools/meres-csomag.ps1). Both expect the `C:\Games\NOT_GTAVI` folder layout and have `<JATEKMAPPA>` in place of the game folder's name; their comments and messages are in Hungarian. The same by hand:
+The measurements are started by the menu in [`progress/tools/Inditas-Csomag.cmd`](progress/tools/Inditas-Csomag.cmd) and by [`meres-csomag.ps1`](progress/tools/meres-csomag.ps1). Both expect the `C:\Games\NOT_GTAVI` folder layout and have `<JATEKMAPPA>` in place of the game folder's name; their comments and on-screen messages are in Hungarian. The user's run guide is [`progress/run-guide.md`](progress/run-guide.md). The same by hand:
 
 ```powershell
 $s = @{
@@ -111,7 +112,7 @@ $s = @{
   VICTORY_JOIN_PARTS='8'; VICTORY_UPLOAD_AHEAD='1'; VICTORY_PORT_CONSTANTS='1'; VICTORY_PORT_DESCRIPTORS='1'
   VICTORY_PORT_CBV='1'; VICTORY_PORT_GUARD='1'; VICTORY_PORT_JOURNAL='1'; VICTORY_PANEL='1'
   VICTORY_PIPELINE_BOOK='1'; VICTORY_TEXTURE_MAX='512'; VICTORY_TEXTURE_LOOK_MS='250'
-  VICTORY_PORT_CONSTANTS_ORDER='0'; VICTORY_PRELUDE_POOL='1'
+  VICTORY_PORT_CONSTANTS_ORDER='0'; VICTORY_PRELUDE_POOL='1'; VICTORY_STAGING_SPARES='2'
   VICTORY_FIDELITYFX_DIR='<folder of the FSR dll>'; VICTORY_RECORD_DIR='<where F9 videos go>'
 }
 $s.VICTORY_SKIP_PIPELINES = (Get-Content progress\tools\rt-feloldo-shaderek.txt | Where-Object { $_ -match '^[0-9a-f]{16}$' }) -join ','
@@ -129,11 +130,21 @@ The account picker only reacts to a controller. `scripts\play.ps1` at the top le
 
 ## What comes next
 
-### 1. Lost writes into compressed textures (the most important now)
+### 1. The 20 ms wait while sailing: let the CPU and the GPU work together
+
+**What we see** (Claude-29, while sailing): 48–54 ms a frame, but the GPU is only 36–55% busy and the CPU 47–66%. Of the submitting thread's time, **20.1 ms a frame is waiting for flights**: `card steps … 3.62 submissions waited for a learned page; 13 pages learned`.
+
+**Why:** `CARD_STEPS_LEARN` (the boat fix) learned 13 memory pages (about 52 KB) that the game writes after it submits. A submission that fills from them waits until the card has finished everything before it, so the card runs dry while the thread waits, and then waits for the thread. The work is serialised.
+
+**The plan:** let the card read those pages in place, at the moment it runs, the way renderer port 1 already reads the game's 174 MB constants heap (a GPU-visible view of the game's memory). Then the fill gets the bytes the game wrote by then, as on the console, and nobody waits. Code: the `late` module of `crates/victory-gpu/src/host/card_steps.rs` (where a learned page makes a submission wait) and `crates/victory-gpu/src/port.rs` (port 1's in-place memory). Behind its own switch, with live A/B in the boat scene. Expected: about 20 → 28–30 fps while sailing, keeping the boat fix.
+
+**Spikes:** the HUD shows 65–125 ms frames while sailing, but the log only has 20 s averages. First a per-frame log (frame time, waiting for flights, GPU time), then the causes can be counted (pipeline making, texture uploads, page-ins).
+
+### 2. Lost writes into compressed textures
 
 **What we see:**
-- A repeated warning in the log: `placed unordered texture view not mirrored (null: writes through it are lost)`, more than 8,000 times in a 6-minute run.
-- The formats: 71 BC1_UNORM, 72 BC1_UNORM_SRGB, 80 BC4_UNORM, 98 BC7_UNORM; 32–1024 px, with full mip chains.
+- A repeated warning in the log: `placed unordered texture view not mirrored (null: writes through it are lost)`, more than 16,000 times in a 6-minute run.
+- The formats: 71 BC1_UNORM, 72 BC1_UNORM_SRGB, 78 BC3_UNORM_SRGB, 80 BC4_UNORM, 98 BC7_UNORM, 99 BC7_UNORM_SRGB, and also 87 B8G8R8A8_UNORM; 4–1024 px, with full mip chains, cube maps too.
 - The timing matches the problems: the count passed 4,096 exactly while the garbage face was on screen.
 
 **Where it is in the code:**
@@ -143,28 +154,25 @@ The account picker only reacts to a controller. `scripts\play.ps1` at the top le
 | `crates/victory-gpu/src/descriptor.rs`, `create_placed_uav` / `create_placed_srv` | The game's device methods 0x238 and 0x230: views of memory it placed itself, `(resource desc [14 words], view desc [16 words], handle)` |
 | `crates/victory-gpu/src/descriptor/host.rs`, the `View::Placed` branch (search for the warning text) | This is where a writable view of such a texture gets a null view |
 | `placed_texture()` → `crate::resource::texture_at(address, resource)` | How **shader (read) views** find the host texture made for that memory; the address is in words 10–11 of the view description |
+| `crates/victory-gpu/src/port_descriptors.rs` | Port 2: descriptor records the game writes into its heap itself, found by the fallback ("no store told of") |
 | `crates/victory-gpu/src/texback.rs` | copying textures the GPU wrote back into the game's memory |
 
 **The open question:**
-- In the **writable** views, words 10–11 are 0, so we do not yet know which texture they belong to.
-- The current build therefore logs all 16 words of each such view.
-- **A run that loads a scene is needed**; loading the save and reaching the first cutscene is enough.
+- The writable views carry **no address at all**: every logged view is `[fmt, dim, 0x1688, 0, 0, 15, 0 … 0, 3]`, words 10–14 are 0 (Claude-29).
+- So the game creates the view without memory and completes it later, most likely by writing the address straight into the descriptor record in its heap.
+- **Next step:** follow a slot that got a placed writable view: what the game writes into that record afterwards, and whether our own record for it is overwritten.
 
 **The plan:**
-1. Once the address is known: for each (texture, mip) writable view, an uncompressed "block twin" texture at a quarter of the width and height. `R32G32_UINT` for BC1/BC4 (8-byte blocks), `R32G32B32A32_UINT` for BC5/BC7 (16-byte blocks).
+1. Once the texture is known: for each (texture, mip) writable view, an uncompressed "block twin" texture at a quarter of the width and height. `R32G32_UINT` for BC1/BC4 (8-byte blocks), `R32G32B32A32_UINT` for BC3/BC5/BC7 (16-byte blocks).
 2. The writable view points at the twin. After the dispatches, `CopyTextureRegion` copies from the twin into the BC texture.
 3. **To be checked:** exactly what D3D12 allows when copying between a BC format and an uncompressed format of the same block size. The alternative is relaxed format casting (`D3D12_OPTIONS12`) with a castable-format list.
 4. Switch: `VICTORY_BC_WRITES`. Measure it with live A/B in the same scene: the garbage face, Cal's beard, the tourist boat.
 
-### 2. The glasses
+### 3. The glasses
 
 **Ruled out:** a clamp after `sr_denoising:CS_UpdateHistory` (`Role::Reflect`); measured with no effect (Claude-26).
 
 **Next:** find the reflecting render pass with the frame record and replay tools ([docs/replay.md](docs/replay.md)).
-
-### 3. Frame rate while sailing
-
-The `late` module of `crates/victory-gpu/src/host/card_steps.rs` (`LEARN`) waits on learned pages: about 3.8 submissions a frame, 16–17 ms. Idea: finer, per-buffer learning.
 
 ### 4. RAM
 
@@ -180,7 +188,7 @@ The `late` module of `crates/victory-gpu/src/host/card_steps.rs` (`LEARN`) waits
    - a launcher run writes the log, a memory sample every second and the marks;
    - an F9 video is recorded;
    - two variants go into the same run with live A/B (`VICTORY_AB=<seconds>,<switch>`).
-4. **Every measurement gets a report** in [`progress/reports`](progress/reports) and a dated line in the [build watcher](progress/plans/VIctory-buildfigyelo.md). New reports and overviews in this repository are written in English; the older ones are in Hungarian.
+4. **Every measurement gets a report** in [`progress/reports`](progress/reports) and a dated line in the [build watcher](progress/plans/VIctory-buildfigyelo.md). Everything in this repository is written in English.
 5. **Tests:** `cargo test --locked -p victory-gpu --lib <module>::` (for example `list::`). Trying it with the game needs the `diag` build.
 
 ## File map
@@ -188,6 +196,7 @@ The `late` module of `crates/victory-gpu/src/host/card_steps.rs` (`LEARN`) waits
 | Where | What |
 |---|---|
 | `crates/victory-gpu/src/host.rs` | host lists, preludes, `PRELUDE_POOL` |
+| `crates/victory-gpu/src/pool.rs` | texture and staging blocks, `STAGING_SPARES` |
 | `crates/victory-gpu/src/list.rs` | list life cycle, the idle pool |
 | `crates/victory-gpu/src/host/card_steps.rs` | card steps, `LEARN` |
 | `crates/victory-gpu/src/descriptor/host.rs` | views, placed textures, twin views (`TWIN_MOVE`) |

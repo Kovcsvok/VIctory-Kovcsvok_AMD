@@ -1,6 +1,6 @@
 # Progress: VIctory on an RX 9070 XT (Kovcsvok AMD branch)
 
-Status: **27 November 2026, 12:00** (local time). The details are in [`progress/reports`](progress/reports), one report per measurement (Claude-01 … Claude-28, in Hungarian). English summaries of every report are in the [report index](progress/reports/README.md).
+Status: **27 November 2026, 12:55** (local time). The details are in [`progress/reports`](progress/reports), one report per measurement (Claude-01 … Claude-29), with a short summary of each in the [report index](progress/reports/README.md).
 
 ## In short: where are we?
 
@@ -17,7 +17,7 @@ Status: **27 November 2026, 12:00** (local time). The details are in [`progress/
 **What is still wrong:**
 1. **Colourful blocky garbage on some faces**, a **vanishing beard** (Cal) and a **boat side that disappears at a distance** (the tourist boat). The common suspect: the game compresses some textures itself on the GPU, and those writes are lost here. **This is the next fix.**
 2. **Glasses reflect the sky.** The render pass responsible has not been found yet.
-3. **Frame rate:** the boat fix (`LEARN`) costs about 5–6 fps while sailing.
+3. **Frame rate:** while sailing the submitting thread waits about 20 ms a frame for the card because of the boat fix (`LEARN`), so neither the CPU nor the GPU is full (20–25 fps, GPU 36–55%).
 4. **RAM:** on 32 GB the game takes 26–27 GB. There are still items to cut (permanent host lists, the view-shape cache).
 
 ## The machine and the goal
@@ -51,7 +51,7 @@ Status: **27 November 2026, 12:00** (local time). The details are in [`progress/
 | **This repository, `main`** | Belobug's `cd8dfc06` plus one commit with every change of the bundle (see below). |
 | Antigravity `agy-9070-v2` | Antigravity's own build; not here, and we do not write to it. |
 
-Plans and the record of sources, in [`progress/plans`](progress/plans) (Hungarian):
+Plans and the record of sources, in [`progress/plans`](progress/plans):
 - the [build watcher](progress/plans/VIctory-buildfigyelo.md): every source and measurement, dated;
 - the [fork plan](progress/plans/VIctory-forkterv.md);
 - the [test order](progress/plans/VIctory-teszteles-es-javitasi-sorrend.md).
@@ -115,6 +115,10 @@ Plans and the record of sources, in [`progress/plans`](progress/plans) (Hungaria
   - Cal's beard vanishes without the card steps too, so they are not the cause;
   - the common suspect for the beard, the garbage face and the tourist boat is lost writes into compressed textures;
   - the video is now closed properly when the window is closed.
+- **Claude-29:**
+  - Codex's staging cap (`VICTORY_STAGING_SPARES=2`) saves about 128 MB;
+  - the lost writable texture views carry no address in any of their 16 words, so the texture has to be found another way;
+  - while sailing the submitting thread waits about 20 ms a frame for the card (`CARD_STEPS_LEARN`, 13 learned pages): neither the CPU nor the GPU is full (HUD: GPU 36–55%, CPU 47–66%).
 
 ## The bundle's current settings (menu option 1)
 
@@ -128,6 +132,7 @@ Plans and the record of sources, in [`progress/plans`](progress/plans) (Hungaria
 | `VICTORY_CARD_STEPS=2` + `VICTORY_CARD_STEPS_LEARN` | boat fix (avatarmanz PR 434): a faithful picture, but slower |
 | `VICTORY_SKIP_PIPELINES=…` | the 42 character ray-tracing resolve shaders skipped (against blue faces) |
 | `VICTORY_PRELUDE_POOL=1` | shared prelude pool, about 1 GB less RAM |
+| `VICTORY_STAGING_SPARES=2` | at most 2 empty 64 MB texture upload blocks kept (Codex), about 128 MB less |
 | `VICTORY_TEXTURE_NO_WAIT`, `VICTORY_RELAY=2`, `VICTORY_JOIN_*`, `VICTORY_INDIRECT_*`, `VICTORY_UPLOAD_AHEAD`, `VICTORY_THIN` … | the Belobug bundle's speed-ups |
 
 The full list is in each run's `futas.txt` and in [`meres-csomag.ps1`](progress/tools/meres-csomag.ps1); the menu options are in [`Inditas-Csomag.cmd`](progress/tools/Inditas-Csomag.cmd). The README has the same set as a PowerShell block.
@@ -149,16 +154,17 @@ The full list is in each run's `futas.txt` and in [`meres-csomag.ps1`](progress/
 
 | # | Problem | Where we are | Next step |
 |---|---|---|---|
-| 1 | garbage faces, vanishing beard, boat side gone at a distance, odd eyebrows and eyelashes | Thousands of lost writes into BC1/BC4/BC7 textures in the log (`placed unordered texture view not mirrored`). D3D12 does not allow writable views of compressed formats. | The new build logs each view's full description. One short run will show which texture the game writes to. Then: an uncompressed "block twin" texture and a copy into the real one, behind `VICTORY_BC_WRITES`. |
-| 2 | glasses reflect the sky | The clamp after `CS_UpdateHistory` has no effect; the source is another pass. | Find the reflecting render pass. |
-| 3 | frame rate while sailing (20–25) | `LEARN` waits about 10 ms a frame. | Later: more targeted learning. |
-| 4 | RAM (26–27 GB for the game) | The prelude pool is done. | Lazy permanent host lists (1–2 GB); the view-shape cache (up to 1 GB); `VICTORY_RESIDENCY` only with `VICTORY_BURY_LAG=64`. |
+| 1 | frame rate while sailing (20–25), the GPU not full, spikes | The submitting thread waits about 20 ms a frame for the card because of `CARD_STEPS_LEARN` (13 learned pages the game writes after submitting); the work is serialised. Spikes of 65–125 ms show on the HUD; the log only has 20 s averages. | The card reads the learned pages in place, as port 1 does for the constants heap, instead of the thread waiting (own switch, live A/B). For the spikes: a per-frame log first. |
+| 2 | garbage faces, vanishing beard, boat side gone at a distance, odd eyebrows and eyelashes | More than 16,000 lost writes a run into BC1/BC3/BC4/BC7 (and one B8G8R8A8) textures (`placed unordered texture view not mirrored`). D3D12 does not allow writable views of compressed formats. The views carry no address (words 10–14 are 0, Claude-29). | Follow where the game completes the record (most likely it writes the address into the descriptor record itself; port 2's fallback finds such records). Then: an uncompressed "block twin" texture and a copy into the real one, behind `VICTORY_BC_WRITES`. |
+| 3 | glasses reflect the sky | The clamp after `CS_UpdateHistory` has no effect; the source is another pass. | Find the reflecting render pass. |
+| 4 | RAM (26–27 GB for the game) | The prelude pool and the staging cap are done. | Lazy permanent host lists (1–2 GB); the view-shape cache (up to 1 GB); `VICTORY_RESIDENCY` only with `VICTORY_BURY_LAG=64`. |
 | 5 | clouds jump a little | Only observed. | — |
 
 **Decisions open with Codex:**
 - Claude-26: the direction for restoring the lost writes;
 - Claude-27: whether `PRELUDE_POOL` is the default everywhere;
-- Claude-28: whether writes into compressed textures are the next fix.
+- Claude-28: whether writes into compressed textures are the next fix;
+- Claude-29: whether reading the learned pages in place (against the 20 ms wait) comes first.
 
 ## How we measure
 
@@ -190,4 +196,4 @@ The full list is in each run's `futas.txt` and in [`meres-csomag.ps1`](progress/
 - videos, logs, screenshots (the repository is text-only, see `docs/asset-policy.md`; image links in the reports therefore do not open here);
 - personal data.
 
-**About the scripts:** `<JATEKMAPPA>` stands in place of the game folder's name; put your own folder there before running. The scripts expect the `C:\Games\NOT_GTAVI` folder layout, and their comments and messages are in Hungarian. [`progress/Futtatasi-utmutato.md`](progress/Futtatasi-utmutato.md) is the run guide for the user, in Hungarian.
+**About the scripts:** `<JATEKMAPPA>` stands in place of the game folder's name; put your own folder there before running. The scripts expect the `C:\Games\NOT_GTAVI` folder layout, and their comments and on-screen messages are in Hungarian. [`progress/run-guide.md`](progress/run-guide.md) is the user's run guide.
